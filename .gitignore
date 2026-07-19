@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.idea/
+logs/
+*.db
+*.sqlite
+*.log
+.vscode/*
+!.vscode/settings.json
