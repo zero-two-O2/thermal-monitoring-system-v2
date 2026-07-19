@@ -1,0 +1,4 @@
+#To create foulder structure
+tree /F /A > docs/project_tree.md
+
+#
