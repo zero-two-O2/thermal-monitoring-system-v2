@@ -96,3 +96,4 @@ class AlarmResult:
     state: AlarmState = AlarmState.NORMAL
 
     event: AlarmEvent | None = None
+    
