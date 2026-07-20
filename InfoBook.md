@@ -492,4 +492,4 @@ EASY PARAMETERS
 [Consumer]trigger_activation
 [Consumer]trigger_delay
 [Consumer]trigger_software
-HB25100004: Automatic Fine Offset Disabled
+

@@ -1,2 +1,3 @@
 # Put calibratiom bob in the assets/calibration ✓
-# 
+# ok. tell me the improvementa and exact loction where to make them. also i thing i want to add. so every camera has a unique serial no now i dont want tha cameras that open first to take first place tile in the GUI windows. what i want is we will sane the camera IP , serial no, and other details in Db and assign each camera a no. so each no camera will be given a spacific tile in the GUI window. i this correct. tell me waht changes to make for this and other changes
+#

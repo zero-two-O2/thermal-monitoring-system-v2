@@ -148,17 +148,11 @@ class ProcessingPipeline:
         #
 
         return FrameResult(
-
             raw_frame=raw_frame,
-
             processed_frame=processed_frame,
-
             statistics=statistics,
-
             roi_results=roi_results,
-
             alarms=alarms,
-
         )
 
     # ==========================================================
