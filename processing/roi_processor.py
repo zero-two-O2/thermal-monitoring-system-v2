@@ -382,21 +382,12 @@ class ROIProcessor:
 
         )
 
-        alarm_active = self._check_alarm(
-
-            roi,
-
-            statistics,
-
-        )
 
         return ROIResult(
 
             roi=roi,
 
             statistics=statistics,
-
-            alarm_active=alarm_active,
 
         )
 
@@ -444,70 +435,3 @@ class ROIProcessor:
 
         )
 
-    # ==========================================================
-    # Alarm Evaluation
-    # ==========================================================
-
-    @staticmethod
-    def _check_alarm(
-        roi: ROI,
-        statistics: ROIStatistics,
-    ) -> bool:
-        """
-        Simple alarm evaluation.
-
-        Advanced alarm logic will be moved to
-        AlarmProcessor.
-        """
-
-        alarm = roi.alarm
-
-        if not alarm.enabled:
-
-            return False
-
-        if alarm.condition == AlarmCondition.HIGH:
-
-            return (
-
-                statistics.maximum
-
-                >=
-
-                alarm.value
-
-            )
-
-        elif alarm.condition == AlarmCondition.LOW:
-
-            return (
-
-                statistics.minimum
-
-                <=
-
-                alarm.value
-
-            )
-
-        elif alarm.condition == AlarmCondition.RANGE:
-
-            return (
-
-                statistics.minimum
-
-                <
-
-                alarm.value
-
-                or
-
-                statistics.maximum
-
-                >
-
-                alarm.value
-
-            )
-
-        return False

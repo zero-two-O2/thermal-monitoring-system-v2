@@ -156,13 +156,14 @@ class ROI:
 @dataclass(slots=True)
 class ROIResult:
     """
-    Result produced after processing one ROI.
+    Statistics produced for one ROI.
+
+    Alarm evaluation is performed separately by
+    AlarmProcessor.
     """
 
     roi: ROI
 
     statistics: ROIStatistics
 
-    alarm_active: bool = False
-
-    alarm_message: str | None = None
+    alarm_message: str = ""
