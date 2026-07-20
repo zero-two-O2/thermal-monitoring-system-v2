@@ -22,7 +22,6 @@ from processing.models.roi_models import (
     ROIStatistics,
     AlarmCondition,
 )
-
 from processing.models.processing_models import (
     ProcessedFrame,
 )
@@ -34,17 +33,11 @@ class ROIProcessor:
     Region Of Interest processing engine.
     """
     def __init__(self) -> None:
-        
         # ROI configuration
-        
         self._rois: Dict[str, ROI] = {}
-        
         # Cached masks
-        
         self._mask_cache: Dict[str, np.ndarray] = {}
-        
         # Image size used when masks were built
-        
         self._mask_size: tuple[int, int] | None = None
 
     # ==========================================================
@@ -256,39 +249,23 @@ class ROIProcessor:
         """
         Draw a filled circle.
         """
-
         if len(roi.points) != 1:
-
             return
-
         center = (
-
             int(roi.points[0][0]),
-
             int(roi.points[0][1]),
-
         )
-
         radius = int(
             roi.radius
         )
-
         if radius <= 0:
-
             return
-
         cv2.circle(
-
             mask,
-
             center,
-
             radius,
-
             255,
-
             thickness=-1,
-
         )
 
     # ==========================================================
@@ -302,7 +279,6 @@ class ROIProcessor:
         """
         Number of pixels inside the ROI.
         """
-
         return int(
             np.count_nonzero(mask)
         )
@@ -321,17 +297,11 @@ class ROIProcessor:
         """
 
         values = image[mask]
-
         values = values[np.isfinite(values)]
-
         if values.size == 0:
-
             statistics = ROIStatistics()
-
             return ROIResult(
-
                 roi=roi,
-
                 statistics=statistics,
 
             )
@@ -341,13 +311,9 @@ class ROIProcessor:
         #
 
         minimum = float(values.min())
-
         maximum = float(values.max())
-
         mean = float(values.mean())
-
         median = float(np.median(values))
-
         standard_deviation = float(values.std())
 
         #
@@ -355,40 +321,26 @@ class ROIProcessor:
         #
 
         hotspot_x, hotspot_y = self._find_hotspot(
-
             image,
-
             mask,
-
         )
 
         statistics = ROIStatistics(
-
             minimum=minimum,
-
             maximum=maximum,
-
             mean=mean,
-
             median=median,
-
             standard_deviation=standard_deviation,
-
             hotspot_x=hotspot_x,
-
             hotspot_y=hotspot_y,
-
             pixel_count=values.size,
 
         )
 
 
         return ROIResult(
-
             roi=roi,
-
             statistics=statistics,
-
         )
 
     # ==========================================================
@@ -404,34 +356,21 @@ class ROIProcessor:
         Return coordinates of the hottest pixel
         inside the ROI.
         """
-
         rows, cols = np.where(mask)
-
         if rows.size == 0:
-
             return -1, -1
-
         temperatures = image[rows, cols]
-
         temperatures = np.nan_to_num(
-
             temperatures,
-
             nan=-np.inf,
-
         )
 
         hottest = int(
-
             np.argmax(temperatures)
-
         )
 
         return (
-
             int(cols[hottest]),
-
             int(rows[hottest]),
-
         )
 
