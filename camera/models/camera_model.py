@@ -39,6 +39,7 @@ class CameraModel:
 
     camera_id: str
     camera_name: str
+    calibration_file: str | None = None
 
     # ==========================================================
     # Hardware Information

@@ -1,0 +1,2 @@
+LowerTemp=-20.000000
+UpperTemp=80.000000
