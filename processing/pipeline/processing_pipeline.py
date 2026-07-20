@@ -1,7 +1,7 @@
 """
 processing_pipeline.py
 
-Main processing pipeline for one thermal frame.
+Main processing pipeline.
 
 Pipeline
 
@@ -13,15 +13,20 @@ Calibration
     ▼
 Temperature Image
     │
-    ├── Statistics
-    ├── ROI Processing
-    ├── Alarm Processing
-    └── Display Image
+    ▼
+Processed Frame
+    │
+    ▼
+ROI Processing
+    │
+    ▼
+Alarm Processing
+    │
+    ▼
+FrameResult
 """
 
 from __future__ import annotations
-
-from typing import Optional
 
 from calibration.calibration_manager import CalibrationManager
 from calibration.calibration_processor import CalibrationProcessor
@@ -40,24 +45,17 @@ from utilities import logger
 
 
 class ProcessingPipeline:
-    """
-    High-level frame processing pipeline.
-
-    This class coordinates the individual processors.
-
-    It does not implement ROI or Alarm logic itself.
-    """
 
     def __init__(
         self,
         calibration_manager: CalibrationManager,
-    ) -> None:
+        roi_processor: ROIProcessor,
+        alarm_processor: AlarmProcessor,
+    ):
 
         self._calibration = calibration_manager
-
-        self._roi_processor = ROIProcessor()
-
-        self._alarm_processor = AlarmProcessor()
+        self._roi_processor = roi_processor
+        self._alarm_processor = alarm_processor
 
     # ==========================================================
     # Public
@@ -65,47 +63,39 @@ class ProcessingPipeline:
 
     def process(
         self,
+        camera_id: str,
+        position_id: str,
         raw_frame: RawFrame,
     ) -> FrameResult:
         """
-        Process one camera frame.
+        Process one thermal frame.
         """
 
-        logger.debug(
-            "Processing frame..."
-        )
+        logger.debug("Processing frame...")
 
         calibration = self._calibration.get_calibration()
 
         #
-        # Raw -> Temperature
+        # Temperature image
         #
 
         temperature_image = (
             CalibrationProcessor.raw_to_temperature(
-
                 raw_frame.image,
-
                 calibration,
-
                 raw_frame.range_index,
-
             )
         )
 
         #
-        # Display Image
+        # Display image
         #
 
         display_image = (
             CalibrationProcessor.raw_to_display(
-
                 raw_frame.image,
-
                 calibration,
-
                 raw_frame.range_index,
-
             )
         )
 
@@ -118,7 +108,7 @@ class ProcessingPipeline:
         )
 
         #
-        # Processed Frame
+        # Processed frame
         #
 
         processed_frame = ProcessedFrame(
@@ -132,28 +122,30 @@ class ProcessingPipeline:
         )
 
         #
-        # ROI Analysis
+        # ROI Processing
         #
 
-        roi_results = (
-            self._roi_processor.process(
-
-                processed_frame
-
-            )
+        roi_results = self._roi_processor.process(
+            processed_frame
         )
 
         #
-        # Alarm Evaluation
+        # Alarm Processing
         #
 
-        alarms = (
-            self._alarm_processor.process(
+        alarms = self._alarm_processor.process(
 
-                roi_results
+            camera_id=camera_id,
 
-            )
+            position_id=position_id,
+
+            roi_results=roi_results,
+
         )
+
+        #
+        # Final result
+        #
 
         return FrameResult(
 
@@ -168,16 +160,17 @@ class ProcessingPipeline:
             alarms=alarms,
 
         )
-        # ==========================================================
+
+    # ==========================================================
     # Statistics
     # ==========================================================
 
+    @staticmethod
     def _build_statistics(
-        self,
         temperature_image,
     ) -> CameraStatistics:
         """
-        Calculate frame statistics.
+        Calculate statistics for the complete frame.
         """
 
         statistics = (
@@ -208,9 +201,6 @@ class ProcessingPipeline:
         self,
         rois,
     ) -> None:
-        """
-        Load ROI configuration into the ROI processor.
-        """
 
         self._roi_processor.load(
             rois
@@ -219,36 +209,18 @@ class ProcessingPipeline:
     def clear_rois(
         self,
     ) -> None:
-        """
-        Remove all configured ROIs.
-        """
 
         self._roi_processor.clear()
 
     # ==========================================================
-    # Alarm Configuration
+    # Alarm
     # ==========================================================
 
-    def load_alarm_configuration(
-        self,
-        configuration,
-    ) -> None:
-        """
-        Load alarm configuration.
-        """
-
-        self._alarm_processor.load(
-            configuration
-        )
-
-    def reset_alarms(
+    def clear_alarms(
         self,
     ) -> None:
-        """
-        Reset all active alarms.
-        """
 
-        self._alarm_processor.reset()
+        self._alarm_processor.clear()
 
     # ==========================================================
     # Accessors
@@ -274,5 +246,3 @@ class ProcessingPipeline:
     ) -> AlarmProcessor:
 
         return self._alarm_processor
-    
-    

@@ -47,73 +47,31 @@ class RecordingConfiguration:
 
 @dataclass(slots=True)
 class PositionModel:
-    """
-    One monitoring position.
-
-    Example
-
-        Camera 1
-            ├── Position 001
-            ├── Position 002
-            └── Position 003
-    """
-
-    #
-    # Identity
-    #
 
     position_id: str
-    camera_id: str = ""
+    camera_id: str
+    camera_name: str =""
 
-    name: str
+    name: str = ""
 
     sequence: int = 0
-
     enabled: bool = True
-
     description: str = ""
 
-    #
-    # Camera Location
-    #
-
     pan: float = 0.0
-
     tilt: float = 0.0
-
     zoom: float = 1.0
 
-    #
-    # Calibration
-    #
-
     calibration_range: int = 0
-
     emissivity: float = 0.95
-
     background_temperature: float = 20.0
-
     transmission_coefficient: float = 1.0
 
-    #
-    # ROI
-    #
-
-    rois: list[ROI] = field(
-        default_factory=list
-    )
-
-    #
-    # Recording
-    #
+    rois: list[ROI] = field(default_factory=list)
 
     recording: RecordingConfiguration = field(
         default_factory=RecordingConfiguration
     )
-
-    #
-    # User Metadata
-    #
 
     metadata: dict[str, Any] = field(
         default_factory=dict

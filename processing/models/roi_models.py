@@ -1,50 +1,49 @@
 """
 roi_models.py
 
-ROI data models for the Thermal Monitoring System.
+ROI (Region of Interest) models.
 
-These models are shared by:
-
-- ROI Processor
-- Alarm Processor
-- GUI
-- Database
-- Project Save/Load
+Shared by:
+    - ROI Processor
+    - Alarm Processor
+    - GUI
+    - Database
+    - Configuration
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Optional
+from enum import Enum, auto
+from typing import Any
 
 import numpy as np
 
 
 # ==========================================================
-# ROI Types
+# ROI Type
 # ==========================================================
 
 class ROIType(Enum):
+    """Supported ROI shapes."""
 
-    RECTANGLE = "rectangle"
-
-    POLYGON = "polygon"
-
-    CIRCLE = "circle"
+    RECTANGLE = auto()
+    POLYGON = auto()
+    CIRCLE = auto()
 
 
 # ==========================================================
-# Alarm Types
+# Alarm Condition
 # ==========================================================
 
 class AlarmCondition(Enum):
+    """
+    Alarm evaluation mode.
+    """
 
-    HIGH = "high"
-
-    LOW = "low"
-
-    RANGE = "range"
+    HIGH = auto()
+    LOW = auto()
+    RANGE = auto()
 
 
 # ==========================================================
@@ -53,6 +52,9 @@ class AlarmCondition(Enum):
 
 @dataclass(slots=True)
 class ROIStatistics:
+    """
+    Temperature statistics inside one ROI.
+    """
 
     minimum: float = np.nan
 
@@ -68,13 +70,18 @@ class ROIStatistics:
 
     hotspot_y: int = -1
 
+    pixel_count: int = 0
+
 
 # ==========================================================
-# Alarm Threshold
+# Alarm Configuration
 # ==========================================================
 
 @dataclass(slots=True)
 class AlarmThreshold:
+    """
+    Alarm configuration for one ROI.
+    """
 
     enabled: bool = False
 
@@ -93,12 +100,31 @@ class AlarmThreshold:
 
 @dataclass(slots=True)
 class ROI:
+    """
+    One Region Of Interest.
+    """
+
+    # ------------------------------------------------------
+    # Identity
+    # ------------------------------------------------------
 
     roi_id: str
 
     name: str
 
+    # ------------------------------------------------------
+    # Geometry
+    # ------------------------------------------------------
+
     roi_type: ROIType
+
+    points: list[tuple[int, int]] = field(default_factory=list)
+
+    radius: int = 0
+
+    # ------------------------------------------------------
+    # Display
+    # ------------------------------------------------------
 
     enabled: bool = True
 
@@ -106,48 +132,37 @@ class ROI:
 
     color: tuple[int, int, int] = (0, 255, 0)
 
-    #
-    # Geometry
-    #
+    line_thickness: int = 2
 
-    points: list[tuple[int, int]] = field(
-        default_factory=list
-    )
-
-    radius: int = 0
-
-    #
+    # ------------------------------------------------------
     # Alarm
-    #
+    # ------------------------------------------------------
 
-    alarm: AlarmThreshold = field(
-        default_factory=AlarmThreshold
-    )
+    alarm: AlarmThreshold = field(default_factory=AlarmThreshold)
 
-    #
-    # User data
-    #
+    # ------------------------------------------------------
+    # Metadata
+    # ------------------------------------------------------
 
     description: str = ""
 
-    metadata: dict = field(
-        default_factory=dict
-    )
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 # ==========================================================
-# ROI Result
+# ROI Processing Result
 # ==========================================================
 
 @dataclass(slots=True)
 class ROIResult:
+    """
+    Result produced after processing one ROI.
+    """
 
-    roi_id: str
+    roi: ROI
 
     statistics: ROIStatistics
 
     alarm_active: bool = False
 
-    alarm_message: Optional[str] = None
-
-    
+    alarm_message: str | None = None

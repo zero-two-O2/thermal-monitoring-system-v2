@@ -15,7 +15,7 @@ from camera.manager.position_manager import PositionManager
 from camera.models.camera_model import CameraModel
 from camera.services.tv46l_camera import TV46LCamera
 
-from processing.processing_pipeline import ProcessingPipeline
+from processing.pipeline.processing_pipeline import ProcessingPipeline
 
 
 @dataclass(slots=True)

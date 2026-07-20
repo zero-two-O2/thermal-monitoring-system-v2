@@ -48,27 +48,20 @@ class TV46LCamera:
 
     def __init__(
         self,
-        camera: CameraModel,
-        calibration_file: Optional[Path] = None,
+        camera_model: CameraModel,
+        calibration_manager: CalibrationManager,
     ) -> None:
 
-        self.camera = camera
+        self.camera = camera_model
 
-        self.driver = HalconDriver(camera)
+        self.driver = HalconDriver(camera_model)
 
         self.acquisition = AcquisitionEngine(
             self.driver
         )
 
-        self.calibration = CalibrationManager()
+        self.calibration = calibration_manager
 
-        self._connected = False
-
-        if calibration_file is not None:
-
-            self.calibration.initialize(
-                calibration_file
-            )
 
     # ---------------------------------------------------------
     # Connection

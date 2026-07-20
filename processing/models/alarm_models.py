@@ -1,7 +1,14 @@
 """
 alarm_models.py
 
-Models used by the Alarm Processor.
+Runtime alarm models.
+
+These models are produced by the AlarmProcessor and consumed by:
+
+    - GUI
+    - Database
+    - Alarm History
+    - Logger
 """
 
 from __future__ import annotations
@@ -12,7 +19,7 @@ from enum import Enum, auto
 
 
 # ==========================================================
-# Enumerations
+# Alarm Severity
 # ==========================================================
 
 class AlarmSeverity(Enum):
@@ -27,9 +34,13 @@ class AlarmSeverity(Enum):
     CRITICAL = auto()
 
 
+# ==========================================================
+# Alarm State
+# ==========================================================
+
 class AlarmState(Enum):
     """
-    Current alarm state.
+    Current runtime alarm state.
     """
 
     NORMAL = auto()
@@ -41,45 +52,6 @@ class AlarmState(Enum):
     CLEARED = auto()
 
 
-class AlarmType(Enum):
-    """
-    Supported alarm types.
-    """
-
-    HIGH = auto()
-
-    LOW = auto()
-
-    DELTA = auto()
-
-    RATE_OF_RISE = auto()
-
-
-# ==========================================================
-# Alarm Configuration
-# ==========================================================
-
-@dataclass(slots=True)
-class AlarmThreshold:
-    """
-    Alarm configuration.
-    """
-
-    enabled: bool = True
-
-    alarm_type: AlarmType = AlarmType.HIGH
-
-    severity: AlarmSeverity = AlarmSeverity.WARNING
-
-    limit: float = 0.0
-
-    hysteresis: float = 1.0
-
-    delay_ms: int = 0
-
-    latch: bool = False
-
-
 # ==========================================================
 # Alarm Event
 # ==========================================================
@@ -87,7 +59,7 @@ class AlarmThreshold:
 @dataclass(slots=True)
 class AlarmEvent:
     """
-    One generated alarm.
+    One alarm occurrence.
     """
 
     camera_id: str
@@ -96,13 +68,13 @@ class AlarmEvent:
 
     roi_id: str
 
-    alarm_type: AlarmType
+    roi_name: str
 
     severity: AlarmSeverity
 
-    value: float
+    measured_value: float
 
-    limit: float
+    threshold_value: float
 
     timestamp: datetime = field(
         default_factory=datetime.now
@@ -116,13 +88,11 @@ class AlarmEvent:
 @dataclass(slots=True)
 class AlarmResult:
     """
-    Alarm evaluation result for one ROI.
+    Result returned by AlarmProcessor after evaluating one ROI.
     """
+
+    active: bool = False
 
     state: AlarmState = AlarmState.NORMAL
 
     event: AlarmEvent | None = None
-
-    active: bool = False
-
-    acknowledged: bool = False

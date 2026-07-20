@@ -12,25 +12,20 @@ Responsibilities
 """
 
 from __future__ import annotations
-
 from typing import Dict
-
 import cv2
 import numpy as np
-
 from processing.models.roi_models import (
     ROI,
     ROIResult,
     ROIType,
     ROIStatistics,
     AlarmCondition,
-    AlarmThreshold,
 )
 
 from processing.models.processing_models import (
     ProcessedFrame,
 )
-
 from utilities import logger
 
 
@@ -38,25 +33,18 @@ class ROIProcessor:
     """
     Region Of Interest processing engine.
     """
-
     def __init__(self) -> None:
-
-        #
+        
         # ROI configuration
-        #
-
+        
         self._rois: Dict[str, ROI] = {}
-
-        #
+        
         # Cached masks
-        #
-
+        
         self._mask_cache: Dict[str, np.ndarray] = {}
-
-        #
+        
         # Image size used when masks were built
-        #
-
+        
         self._mask_size: tuple[int, int] | None = None
 
     # ==========================================================
@@ -70,52 +58,37 @@ class ROIProcessor:
         """
         Load ROI configuration.
         """
-
         self.clear()
-
         for roi in rois:
-
             self._rois[roi.roi_id] = roi
-
         logger.info(
             f"Loaded {len(rois)} ROIs."
         )
-
     def add_roi(
         self,
         roi: ROI,
     ) -> None:
-
         self._rois[roi.roi_id] = roi
-
         self.invalidate_cache()
-
     def remove_roi(
         self,
         roi_id: str,
     ) -> None:
-
         if roi_id in self._rois:
-
             del self._rois[roi_id]
-
         self.invalidate_cache()
 
     def update_roi(
         self,
         roi: ROI,
     ) -> None:
-
         self._rois[roi.roi_id] = roi
-
         self.invalidate_cache()
 
     def clear(
         self,
     ) -> None:
-
         self._rois.clear()
-
         self.invalidate_cache()
 
     # ==========================================================
@@ -129,47 +102,29 @@ class ROIProcessor:
         """
         Process all enabled ROIs.
         """
-
         image = frame.temperature_image
-
         if image is None:
-
             return []
-
         self._ensure_masks(
             image.shape
         )
-
         results: list[ROIResult] = []
-
         for roi in self._rois.values():
-
             if not roi.enabled:
-
                 continue
-
             mask = self._mask_cache.get(
                 roi.roi_id
             )
-
             if mask is None:
-
                 continue
-
             result = self._process_roi(
-
                 roi,
-
                 image,
-
                 mask,
-
             )
-
             results.append(
                 result
             )
-
         return results
 
     # ==========================================================
@@ -179,50 +134,31 @@ class ROIProcessor:
     def invalidate_cache(
         self,
     ) -> None:
-
         self._mask_cache.clear()
-
         self._mask_size = None
 
     def _ensure_masks(
         self,
         image_shape: tuple[int, int],
     ) -> None:
-
         if (
-
             self._mask_size == image_shape
-
             and
-
             len(self._mask_cache) == len(self._rois)
-
         ):
-
             return
-
         logger.info(
             "Building ROI mask cache..."
         )
-
         self._mask_cache.clear()
-
         self._mask_size = image_shape
-
         for roi in self._rois.values():
-
             self._mask_cache[roi.roi_id] = (
-
                 self._build_mask(
-
                     roi,
-
                     image_shape,
-
                 )
-
             )
-
         logger.info(
             f"Cached {len(self._mask_cache)} ROI masks."
         )
@@ -239,35 +175,26 @@ class ROIProcessor:
         """
         Build a binary mask for one ROI.
         """
-
         height, width = image_shape
-
         mask = np.zeros(
             (height, width),
             dtype=np.uint8,
         )
-
         if roi.roi_type == ROIType.RECTANGLE:
-
             self._draw_rectangle(
                 mask,
                 roi,
             )
-
         elif roi.roi_type == ROIType.POLYGON:
-
             self._draw_polygon(
                 mask,
                 roi,
             )
-
         elif roi.roi_type == ROIType.CIRCLE:
-
             self._draw_circle(
                 mask,
                 roi,
             )
-
         return mask.astype(bool)
 
     # ==========================================================
@@ -282,25 +209,15 @@ class ROIProcessor:
         """
         Draw a filled rectangle.
         """
-
         if len(roi.points) != 2:
-
             return
-
         (x1, y1), (x2, y2) = roi.points
-
         cv2.rectangle(
-
             mask,
-
             (int(x1), int(y1)),
-
             (int(x2), int(y2)),
-
             255,
-
             thickness=-1,
-
         )
 
     # ==========================================================
@@ -315,27 +232,16 @@ class ROIProcessor:
         """
         Draw a filled polygon.
         """
-
         if len(roi.points) < 3:
-
             return
-
         polygon = np.asarray(
-
             roi.points,
-
             dtype=np.int32,
-
         ).reshape((-1, 1, 2))
-
         cv2.fillPoly(
-
             mask,
-
             [polygon],
-
             255,
-
         )
 
     # ==========================================================
@@ -424,7 +330,7 @@ class ROIProcessor:
 
             return ROIResult(
 
-                roi_id=roi.roi_id,
+                roi=roi,
 
                 statistics=statistics,
 
@@ -472,6 +378,8 @@ class ROIProcessor:
 
             hotspot_y=hotspot_y,
 
+            pixel_count=values.size,
+
         )
 
         alarm_active = self._check_alarm(
@@ -484,7 +392,7 @@ class ROIProcessor:
 
         return ROIResult(
 
-            roi_id=roi.roi_id,
+            roi=roi,
 
             statistics=statistics,
 

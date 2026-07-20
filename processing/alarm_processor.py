@@ -1,23 +1,23 @@
 """
 alarm_processor.py
 
-Evaluates ROI results and generates alarm results.
+Evaluates ROI results and generates runtime alarms.
 """
 
 from __future__ import annotations
 
 import time
 
+from processing.models.roi_models import (
+    ROIResult,
+    AlarmCondition,
+)
+
 from processing.models.alarm_models import (
     AlarmEvent,
     AlarmResult,
+    AlarmSeverity,
     AlarmState,
-    AlarmThreshold,
-    AlarmType,
-)
-
-from processing.models.roi_models import (
-    ROIResult,
 )
 
 
@@ -32,18 +32,12 @@ class AlarmProcessor:
         # Runtime state
         #
 
-        self._previous_states: dict[
-            str,
-            AlarmState,
-        ] = {}
+        self._previous_states: dict[str, AlarmState] = {}
 
-        self._activation_times: dict[
-            str,
-            float,
-        ] = {}
+        self._activation_times: dict[str, float] = {}
 
     # ==========================================================
-    # Public API
+    # Public
     # ==========================================================
 
     def process(
@@ -60,13 +54,19 @@ class AlarmProcessor:
 
         for roi_result in roi_results:
 
-            result = self._evaluate_roi(
-                camera_id,
-                position_id,
-                roi_result,
-            )
+            results.append(
 
-            results.append(result)
+                self._evaluate_roi(
+
+                    camera_id,
+
+                    position_id,
+
+                    roi_result,
+
+                )
+
+            )
 
         return results
 
@@ -75,130 +75,191 @@ class AlarmProcessor:
     # ==========================================================
 
     def _evaluate_roi(
-            self,
-            camera_id: str,
-            position_id: str,
-            roi_result: ROIResult,
-        ) -> AlarmResult:
+        self,
+        camera_id: str,
+        position_id: str,
+        roi_result: ROIResult,
+    ) -> AlarmResult:
 
-            threshold = roi_result.roi.alarm_threshold
+        roi = roi_result.roi
 
-            if (
-                threshold is None
-                or
-                not threshold.enabled
-            ):
-                return AlarmResult()
+        threshold = roi.alarm
 
-            if threshold.alarm_type == AlarmType.HIGH:
+        #
+        # Alarm disabled
+        #
 
-                triggered = self._check_high_alarm(
-                    roi_result,
-                    threshold,
-                )
+        if not threshold.enabled:
 
-            elif threshold.alarm_type == AlarmType.LOW:
+            return AlarmResult()
 
-                triggered = self._check_low_alarm(
-                    roi_result,
-                    threshold,
-                )
+        #
+        # Evaluate condition
+        #
 
-            elif threshold.alarm_type == AlarmType.DELTA:
+        triggered = self._is_triggered(
 
-                triggered = self._check_delta_alarm(
-                    roi_result,
-                    threshold,
-                )
+            roi_result,
 
-            else:
+            threshold,
 
-                return AlarmResult()
+        )
 
-            key = self._alarm_key(
-                camera_id,
-                position_id,
-                roi_result.roi.roi_id,
+        key = self._alarm_key(
+
+            camera_id,
+
+            position_id,
+
+            roi.roi_id,
+
+        )
+
+        #
+        # Not triggered
+        #
+
+        if not triggered:
+
+            self._previous_states[key] = AlarmState.NORMAL
+
+            self._activation_times.pop(
+
+                key,
+
+                None,
+
             )
 
-            if not triggered:
+            return AlarmResult()
 
-                self._activation_times.pop(
-                    key,
-                    None,
-                )
+        #
+        # Delay
+        #
 
-                self._previous_states[key] = AlarmState.NORMAL
+        if not self._apply_delay(
 
-                return AlarmResult()
+            key,
 
-            if not self._apply_delay(
-                key,
-                threshold.delay_ms,
-            ):
-                return AlarmResult()
+            threshold.delay_ms,
 
-            state = self._apply_hysteresis(
-                key,
-                threshold,
-                triggered,
-            )
+        ):
 
-            if state != AlarmState.ACTIVE:
+            return AlarmResult()
 
-                return AlarmResult()
+        #
+        # Active
+        #
 
-            event = self._create_event(
-                camera_id,
-                position_id,
+        self._previous_states[key] = AlarmState.ACTIVE
+
+        event = AlarmEvent(
+
+            camera_id=camera_id,
+
+            position_id=position_id,
+
+            roi_id=roi.roi_id,
+
+            roi_name=roi.name,
+
+            severity=AlarmSeverity.WARNING,
+
+            measured_value=self._measured_value(
+
                 roi_result,
-                threshold,
-            )
 
-            return AlarmResult(
-                state=AlarmState.ACTIVE,
-                event=event,
-                active=True,
-            )
+                threshold.condition,
+
+            ),
+
+            threshold_value=threshold.value,
+
+        )
+
+        return AlarmResult(
+
+            active=True,
+
+            state=AlarmState.ACTIVE,
+
+            event=event,
+
+        )
 
     # ==========================================================
-    # Alarm Evaluation
+    # Condition Evaluation
     # ==========================================================
 
-    def _check_high_alarm(
-        self,
+    @staticmethod
+    def _is_triggered(
         roi_result: ROIResult,
-        threshold: AlarmThreshold,
+        threshold,
     ) -> bool:
 
-        return (
-            roi_result.statistics.maximum
-            > threshold.limit
-        )
+        stats = roi_result.statistics
 
-    def _check_low_alarm(
-        self,
+        if threshold.condition == AlarmCondition.HIGH:
+
+            return (
+
+                stats.maximum
+
+                >=
+
+                threshold.value
+
+            )
+
+        if threshold.condition == AlarmCondition.LOW:
+
+            return (
+
+                stats.minimum
+
+                <=
+
+                threshold.value
+
+            )
+
+        if threshold.condition == AlarmCondition.RANGE:
+
+            return (
+
+                stats.minimum < threshold.value
+
+                or
+
+                stats.maximum > threshold.value
+
+            )
+
+        return False
+
+    # ==========================================================
+    # Alarm Value
+    # ==========================================================
+
+    @staticmethod
+    def _measured_value(
         roi_result: ROIResult,
-        threshold: AlarmThreshold,
-    ) -> bool:
+        condition: AlarmCondition,
+    ) -> float:
 
-        return (
-            roi_result.statistics.minimum
-            < threshold.limit
-        )
+        stats = roi_result.statistics
 
-    def _check_delta_alarm(
-        self,
-        roi_result: ROIResult,
-        threshold: AlarmThreshold,
-    ) -> bool:
+        if condition == AlarmCondition.HIGH:
 
-        return (
-            roi_result.statistics.delta
-            > threshold.limit
-        )
-    
-        # ==========================================================
+            return stats.maximum
+
+        if condition == AlarmCondition.LOW:
+
+            return stats.minimum
+
+        return stats.maximum
+
+    # ==========================================================
     # Delay
     # ==========================================================
 
@@ -215,7 +276,9 @@ class AlarmProcessor:
         now = time.monotonic()
 
         start = self._activation_times.get(
+
             key
+
         )
 
         if start is None:
@@ -225,79 +288,12 @@ class AlarmProcessor:
             return False
 
         return (
+
             (now - start) * 1000
-            >= delay_ms
-        )
 
-    # ==========================================================
-    # Hysteresis
-    # ==========================================================
+            >=
 
-    def _apply_hysteresis(
-        self,
-        key: str,
-        threshold: AlarmThreshold,
-        triggered: bool,
-    ) -> AlarmState:
-
-        previous = self._previous_states.get(
-            key,
-            AlarmState.NORMAL,
-        )
-
-        if triggered:
-
-            self._previous_states[key] = (
-                AlarmState.ACTIVE
-            )
-
-            return AlarmState.ACTIVE
-
-        self._previous_states[key] = (
-            AlarmState.NORMAL
-        )
-
-        return AlarmState.NORMAL
-    
-        # ==========================================================
-    # Alarm Event
-    # ==========================================================
-
-    def _create_event(
-        self,
-        camera_id: str,
-        position_id: str,
-        roi_result: ROIResult,
-        threshold: AlarmThreshold,
-    ) -> AlarmEvent:
-
-        if threshold.alarm_type == AlarmType.HIGH:
-
-            value = roi_result.statistics.maximum
-
-        elif threshold.alarm_type == AlarmType.LOW:
-
-            value = roi_result.statistics.minimum
-
-        else:
-
-            value = roi_result.statistics.delta
-
-        return AlarmEvent(
-
-            camera_id=camera_id,
-
-            position_id=position_id,
-
-            roi_id=roi_result.roi.roi_id,
-
-            alarm_type=threshold.alarm_type,
-
-            severity=threshold.severity,
-
-            value=value,
-
-            limit=threshold.limit,
+            delay_ms
 
         )
 
@@ -312,24 +308,16 @@ class AlarmProcessor:
         roi_id: str,
     ) -> str:
 
-        return (
-            f"{camera_id}:"
-            f"{position_id}:"
-            f"{roi_id}"
-        )
+        return f"{camera_id}:{position_id}:{roi_id}"
 
-    def clear(
-        self,
-    ) -> None:
+    def clear(self) -> None:
 
         self._previous_states.clear()
 
         self._activation_times.clear()
 
     @property
-    def active_alarm_count(
-        self,
-    ) -> int:
+    def active_alarm_count(self) -> int:
 
         return sum(
 
