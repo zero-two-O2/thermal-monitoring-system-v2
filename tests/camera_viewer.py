@@ -60,6 +60,7 @@ try:
 except ImportError:
     _HAS_PSUTIL = False
 
+import halcon as ha
 from calibration.calibration_manager import CalibrationManager
 from camera.camera_discovery import CameraDiscovery
 from camera.tv46l_camera import TV46LCamera
@@ -285,6 +286,10 @@ class CameraViewerWindow(QMainWindow):
         self._calibration = CalibrationManager()
         self._update_frame_time = 0.0
         self._start_time = time.time()
+        self._current_latency = 0.0
+        self._latency_sum = 0.0
+        self._latency_count = 0
+        self._max_latency = 0.0
 
         self._init_ui()
         self._init_camera()
@@ -408,6 +413,11 @@ class CameraViewerWindow(QMainWindow):
             return
 
         self._calibration.initialize()
+
+        print("\n  === HALCON Buffer / Stream Parameters ===")
+        self._dump_halcon_buffer_params()
+        print("  === End ===\n")
+
         self._status_label.setText(
             f"{cam_info.model} SN={cam_info.serial}  "
             f"FPS: ---"
@@ -420,6 +430,13 @@ class CameraViewerWindow(QMainWindow):
         frame = self._camera.get_latest_frame()
         if frame is None:
             return
+
+        now = time.perf_counter()
+        self._current_latency = (now - frame.acquisition_timestamp) * 1000
+        self._latency_sum += self._current_latency
+        self._latency_count += 1
+        if self._current_latency > self._max_latency:
+            self._max_latency = self._current_latency
 
         self._thermal_view.set_frame(
             frame.image, frame.frame_number
@@ -452,6 +469,11 @@ class CameraViewerWindow(QMainWindow):
         d = self._thermal_view
         diff = cam_frames - d._displayed_frame
 
+        avg_lat = (
+            self._latency_sum / self._latency_count
+            if self._latency_count > 0 else 0.0
+        )
+
         mem_rss = 0.0
         if _HAS_PSUTIL:
             try:
@@ -462,12 +484,14 @@ class CameraViewerWindow(QMainWindow):
 
         gc_count = gc.get_count()
         obj_count = len(gc.get_objects())
-        elapsed = time.time() - self._start_time
 
         print("-" * 55)
         print(f"  Camera frame counter:     {cam_frames}")
         print(f"  Displayed frame number:   {d._displayed_frame}")
         print(f"  Difference:               {diff}")
+        print(f"  Current latency:          {self._current_latency:.1f} ms")
+        print(f"  Average latency:          {avg_lat:.1f} ms")
+        print(f"  Maximum latency:          {self._max_latency:.1f} ms")
         print(f"  _update_frame() time:     {self._update_frame_time:.2f} ms")
         print(f"  set_frame() time:         {d._set_frame_time:.2f} ms")
         print(f"  paintEvent() time:        {d._paint_time:.2f} ms")
@@ -480,6 +504,40 @@ class CameraViewerWindow(QMainWindow):
             print(
                 f"  WARNING: GUI falling behind by {diff} frames"
             )
+
+        if self._latency_count % 10 == 1:
+            self._dump_halcon_buffer_params()
+
+    def _dump_halcon_buffer_params(self):
+        if self._camera is None:
+            return
+        params = [
+            "num_buffers",
+            "buffer_mode",
+            "buffer_strategy",
+            "grab_timeout",
+            "newest_image_only",
+            "AcquisitionMode",
+            "AcquisitionFrameCount",
+            "AcquisitionBurstFrameCount",
+            "TriggerMode",
+            "TriggerSource",
+            "[Stream]GevStreamSeenPacketCount",
+            "[Stream]GevStreamLostPacketCount",
+            "[Stream]GevStreamDeliveredPacketCount",
+            "[Stream]GevStreamUnavailablePacketCount",
+            "[Stream]GevStreamDuplicatePacketCount",
+            "[Stream]GevStreamResendPacketCount",
+        ]
+        print("  --- HALCON Buffer / Stream Params ---")
+        for name in params:
+            try:
+                val = ha.get_framegrabber_param(
+                    self._camera._acq, name
+                )
+                print(f"    {name:.<50s} {repr(val)}")
+            except Exception as e:
+                print(f"    {name:.<50s} ERROR: {e}")
 
     def _adjust_focus(self, delta: int):
         if self._camera is None:

@@ -41,6 +41,7 @@ class RawFrame:
         default_factory=datetime.now
     )
     frame_number: int = 0
+    acquisition_timestamp: float = 0.0
 
 # ==========================================================
 # Processed Frame

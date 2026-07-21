@@ -205,9 +205,9 @@ class TV46LCamera:
                 "num_buffers",
                 32,
             )
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                f"{self.serial}: Unable to set buffer count."
+                f"{self.serial}: Unable to set buffer count: {exc}"
             )
 
         #
@@ -297,6 +297,7 @@ class TV46LCamera:
                 with self._lock:
                     self._latest_frame = frame
                     self._last_frame_time = time.time()
+                    self._frame_counter += 1
                 # FPS
                 self._update_fps()
             except Exception:
@@ -336,12 +337,12 @@ class TV46LCamera:
             )
             raise
 
-        self._frame_counter += 1
         return RawFrame(
             image=frame.copy(),
             range_index=0,
             timestamp=datetime.now(),
             frame_number=self._frame_counter,
+            acquisition_timestamp=time.perf_counter(),
         )
 
 
@@ -361,13 +362,16 @@ class TV46LCamera:
         """
         if timeout is None:
             with self._lock:
-                return self._copy_latest_frame()
+                latest = self._latest_frame
+            if latest is None:
+                return None
+            return self._copy_frame(latest)
         start = time.time()
         while True:
             with self._lock:
-                frame = self._copy_latest_frame()
-            if frame is not None:
-                return frame
+                latest = self._latest_frame
+            if latest is not None:
+                return self._copy_frame(latest)
             if time.time() - start >= timeout:
                 return None
             time.sleep(0.001)
@@ -383,22 +387,25 @@ class TV46LCamera:
         Return the latest frame without waiting.
         """
         with self._lock:
-            return self._copy_latest_frame()
+            latest = self._latest_frame
+        if latest is None:
+            return None
+        return self._copy_frame(latest)
 
     # ==========================================================
     # Internal Copy
     # ==========================================================
 
-    def _copy_latest_frame(
-        self,
-    ) -> RawFrame | None:
-        if self._latest_frame is None:
-            return None
+    @staticmethod
+    def _copy_frame(
+        frame: RawFrame,
+    ) -> RawFrame:
         return RawFrame(
-            image=self._latest_frame.image.copy(),
-            range_index=self._latest_frame.range_index,
-            timestamp=self._latest_frame.timestamp,
-            frame_number=self._latest_frame.frame_number,
+            image=frame.image.copy(),
+            range_index=frame.range_index,
+            timestamp=frame.timestamp,
+            frame_number=frame.frame_number,
+            acquisition_timestamp=frame.acquisition_timestamp,
         )
 
     # ==========================================================
