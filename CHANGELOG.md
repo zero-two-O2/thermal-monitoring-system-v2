@@ -1,3 +1,89 @@
+## 2026-07-21 16:55
+### What changed
+- Added `_scalar()` helper to normalize HALCON list returns (`[value]` → `value`)
+- `get_parameter()` now applies `_scalar()` automatically; removed redundant list checks from all callers
+- Added `wait_for_focus(target_mm, tolerance, timeout)` and `focus_busy()` to Focus API
+- Added `frame_rate_capabilities()` diagnostic that reads min/max/increment/writable
+- `CameraDiscovery._read_camera()` now extracts scalars from HALCON results before `str()` — `CameraInfo` fields are now proper strings, not `"['value']"`
+- Removed temporary debug stack-trace logging from `set_focus_distance()`
+- Removed all per-frame INFO logging (already cleaned up in previous pass)
+### Why
+- Normalize HALCON's inconsistent return types so the rest of the app never has to know about list wrappers
+- Provide a production-ready focus API with settle detection
+- Enable frame-rate capability discovery without hardcoding
+- Clean up debug instrumentation after investigation completed
+### Notes
+- No acquisition logic, threading model, or pipeline code was touched
+- `_scalar()` is module-level in `tv46l_camera.py`; imported by `camera_discovery.py`
+- All autofocus/continuous-focus parameters remain unsupported (confirmed in previous diagnostics)
+### Files Changed
+- camera/tv46l_camera.py (added `_scalar`, `wait_for_focus`, `focus_busy`, `frame_rate_capabilities`; cleaned logging)
+- camera/camera_discovery.py (import `_scalar`, apply before str conversion)
+
+## 2026-07-21 16:52
+### What changed
+- Added trace logging to `set_focus_distance()` — every write logs timestamp, thread ID, requested value, and partial call stack
+- Created `tests/diagnose_fps.py` — comprehensive FPS/jitter/drift root-cause diagnostic
+- Updated `tests/diagnose_focus.py` — five-phase investigation: call-path tracing, autofocus parameter dump, settle monitoring, raw HALCON timing, long-term drift
+### Why
+- Investigate focus command slowness and apparent drift discovered in earlier diagnostics
+- Ensure every focus write is traceable to its source
+### Notes
+- Root cause identified: "drift" was a diagnostic artifact (Phase 4 wrote focus=500 before Phase 5 monitoring); focus is stable with zero drift without commands
+- Camera configured for 1 FPS (`FLK_TI_ControlFeature_SetFrameRate`=1), not 9Hz
+- No production architecture changes required
+- All autofocus/continuous-focus parameters are unsupported by this camera
+### Files Changed
+- camera/tv46l_camera.py (added logging to set_focus_distance)
+- tests/diagnose_fps.py (new file)
+- tests/diagnose_focus.py (updated)
+
+## 2026-07-21 16:00
+### What changed
+- Added three focus control methods to TV46LCamera: `get_focus_distance()`, `set_focus_distance(distance_mm)`, `get_focus_limits()`
+- Created `tests/test_focus_control.py` — standalone hardware test for motorized focus
+- Test displays live image with OpenCV and supports keyboard: +/- for step adjustment, 0/1/2/3 for presets, R to read, Q to quit
+### Why
+- Enable programmatic control of the TV46L motorized lens
+- Validate focus read/write works through HALCON parameters
+### Notes
+- Uses `FLK_TI_ControlFeature_*` parameters for focus distance, limits, and current value
+- Every focus change prints requested vs actual value with PASS/FAIL
+- Acquisition logic is unchanged
+### Files Changed
+- camera/tv46l_camera.py (added Focus Control section with 3 methods)
+- tests/test_focus_control.py (new file)
+
+## 2026-07-21 15:37
+### What changed
+- Created `tests/test_live_pipeline.py` — standalone hardware integration test
+- Test connects to a live TV46L camera, acquires frames, processes them through the full ProcessingPipeline, and displays the result with OpenCV
+- Supports Q to quit and N for manual NUC
+- On exit: cleanly stops acquisition, disconnects camera, destroys OpenCV windows
+### Why
+- Validate the complete backend path (Camera → RawFrame → ProcessingPipeline → FrameResult) without involving GUI or other application components
+- Ensure the fix to `_grab_raw_frame()` works end-to-end with real hardware
+### Notes
+- Falls back to inline calibration if `assets/calibration/calibration_blob.txt` is missing
+- Only processes new frames (skips if `frame.frame_number` hasn't changed)
+- Prints pass/fail markers at each stage
+- Run with: `python tests/test_live_pipeline.py`
+### Files Changed
+- tests/test_live_pipeline.py (new file)
+
+## 2026-07-21 12:30
+### What changed
+- Fixed `_grab_raw_frame()` to construct and return a proper `RawFrame` instead of returning `self._latest_frame` (which was always None)
+- RawFrame is now built with: `image=frame.copy()`, `range_index=0`, `timestamp=datetime.now()`, `frame_number=self._frame_counter`
+### Why
+- The method was ignoring the successfully grabbed numpy array and returning `self._latest_frame`, a stale reference that was always None on first call
+- This caused `wait_for_first_frame()` to always time out despite valid frames being produced by HALCON
+### Notes
+- All other logic in the acquisition path is unchanged
+- The instrumentation logging added in the previous debugging pass is retained
+### Files Changed
+- camera/tv46l_camera.py
+
 ## 2026-07-21 12:00
 ### What changed
 - Added step-by-step instrumentation logging to `_grab_raw_frame()` in TV46L camera driver

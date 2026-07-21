@@ -32,6 +32,12 @@ from processing.models.processing_models import RawFrame
 from utilities.logger import logger
 
 
+def _scalar(value):
+    if isinstance(value, (list, tuple)) and len(value) == 1:
+        return value[0]
+    return value
+
+
 class TV46LCamera:
     """
     Driver for a single Fluke TV46L camera.
@@ -204,6 +210,20 @@ class TV46LCamera:
                 f"{self.serial}: Unable to set buffer count."
             )
 
+        #
+        # Set frame rate to 9 FPS
+        #
+        try:
+            ha.set_framegrabber_param(
+                self._acq,
+                "FLK_TI_ControlFeature_SetFrameRate",
+                9,
+            )
+        except Exception:
+            logger.warning(
+                f"{self.serial}: Unable to set frame rate."
+            )
+
     # ==========================================================
     # Disable Automatic NUC
     # ==========================================================
@@ -295,79 +315,34 @@ class TV46LCamera:
     # ==========================================================
 
     def _grab_raw_frame(self) -> RawFrame:
-        logger.info(f"{self.serial}: _grab_raw_frame - before grab_image_async")
         try:
             image = ha.grab_image_async(
                 self._acq,
                 100,
             )
-            logger.info(f"{self.serial}: _grab_raw_frame - after grab_image_async (success)")
         except Exception:
-            ex = sys.exc_info()[1]
-            ex_type = type(ex).__name__
-            halcon_err = getattr(ex, 'error_code', 'N/A')
-            halcon_text = ""
-            if halcon_err != 'N/A':
-                try:
-                    halcon_text = ha.get_error_text(halcon_err)
-                except Exception:
-                    halcon_text = "(could not retrieve)"
-            logger.error(
-                f"{self.serial}: grab_image_async FAILED | "
-                f"type={ex_type} | "
-                f"halcon_error_code={halcon_err} | "
-                f"halcon_text={halcon_text} | "
-                f"msg={ex}",
-                exc_info=True,
+            logger.exception(
+                f"{self.serial}: grab_image_async FAILED"
             )
             raise
 
-        logger.info(f"{self.serial}: _grab_raw_frame - before himage_as_numpy_array")
         try:
             frame = ha.himage_as_numpy_array(
                 image
             )
-            logger.info(f"{self.serial}: _grab_raw_frame - after himage_as_numpy_array (success)")
         except Exception:
-            ex = sys.exc_info()[1]
-            ex_type = type(ex).__name__
-            halcon_err = getattr(ex, 'error_code', 'N/A')
-            halcon_text = ""
-            if halcon_err != 'N/A':
-                try:
-                    halcon_text = ha.get_error_text(halcon_err)
-                except Exception:
-                    halcon_text = "(could not retrieve)"
-            logger.error(
-                f"{self.serial}: himage_as_numpy_array FAILED | "
-                f"type={ex_type} | "
-                f"halcon_error_code={halcon_err} | "
-                f"halcon_text={halcon_text} | "
-                f"msg={ex}",
-                exc_info=True,
+            logger.exception(
+                f"{self.serial}: himage_as_numpy_array FAILED"
             )
             raise
 
-        logger.info(
-            f"{self.serial}: frame stats - "
-            f"shape={frame.shape} | "
-            f"dtype={frame.dtype} | "
-            f"min={frame.min()} | "
-            f"max={frame.max()}"
-        )
-
         self._frame_counter += 1
-        raw_frame = RawFrame(
+        return RawFrame(
             image=frame.copy(),
             range_index=0,
             timestamp=datetime.now(),
             frame_number=self._frame_counter,
         )
-        logger.info(
-            f"{self.serial}: _grab_raw_frame - RawFrame created "
-            f"(frame_number={raw_frame.frame_number})"
-        )
-        return raw_frame
 
 
     # ==========================================================
@@ -553,7 +528,7 @@ class TV46LCamera:
         ]
         for parameter in parameters:
             try:
-                statistics[parameter] = (
+                statistics[parameter] = _scalar(
                     ha.get_framegrabber_param(
                         self._acq,
                         parameter,
@@ -640,9 +615,11 @@ class TV46LCamera:
             raise RuntimeError(
                 "Camera is not connected."
             )
-        return ha.get_framegrabber_param(
-            self._acq,
-            name,
+        return _scalar(
+            ha.get_framegrabber_param(
+                self._acq,
+                name,
+            )
         )
 
     # ==========================================================
@@ -662,6 +639,57 @@ class TV46LCamera:
             self._acq,
             name,
             value,
+        )
+
+    # ==========================================================
+    # Focus Control
+    # ==========================================================
+
+    def get_focus_distance(self) -> float:
+        return float(
+            self.get_parameter(
+                "FLK_TI_ControlFeature_CurrentFocusDistanceMm"
+            )
+        )
+
+    def set_focus_distance(self, distance_mm: float) -> None:
+        self.set_parameter(
+            "FLK_TI_ControlFeature_SetFocusDistanceMm",
+            distance_mm,
+        )
+
+    def wait_for_focus(
+        self,
+        target_mm: float,
+        tolerance_mm: float = 10,
+        timeout: float = 2.0,
+    ) -> bool:
+        start = time.time()
+        while time.time() - start < timeout:
+            current = self.get_focus_distance()
+            if abs(current - target_mm) <= tolerance_mm:
+                return True
+            time.sleep(0.02)
+        return False
+
+    def focus_busy(self) -> bool:
+        a = self.get_focus_distance()
+        time.sleep(0.05)
+        b = self.get_focus_distance()
+        return abs(b - a) > 1.0
+
+    def get_focus_limits(self) -> tuple[float, float]:
+        return (
+            float(
+                self.get_parameter(
+                    "FLK_TI_ControlFeature_FocusDistanceMm_Min"
+                )
+            ),
+            float(
+                self.get_parameter(
+                    "FLK_TI_ControlFeature_FocusDistanceMm_Max"
+                )
+            ),
         )
 
     # ==========================================================
@@ -710,6 +738,33 @@ class TV46LCamera:
             )
         except Exception:
             return 0
+
+    def frame_rate_capabilities(self) -> dict:
+        candidates = {
+            "current": "FLK_TI_ControlFeature_SetFrameRate",
+            "minimum": "FLK_TI_ControlFeature_SetFrameRate_Min",
+            "maximum": "FLK_TI_ControlFeature_SetFrameRate_Max",
+            "increment": "FLK_TI_ControlFeature_SetFrameRate_Inc",
+        }
+        result = {}
+        for key, param in candidates.items():
+            try:
+                val = _scalar(
+                    ha.get_framegrabber_param(self._acq, param)
+                )
+                result[key] = val
+            except Exception:
+                result[key] = None
+        try:
+            result["writable"] = "read_only" not in str(
+                _scalar(ha.get_framegrabber_param(
+                    self._acq,
+                    "FLK_TI_ControlFeature_SetFrameRate_Writeable",
+                ))
+            ).lower()
+        except Exception:
+            result["writable"] = None
+        return result
 
     # ==========================================================
     # Camera Status

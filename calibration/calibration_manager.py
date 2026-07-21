@@ -12,6 +12,7 @@ Responsibilities
 """
 
 from __future__ import annotations
+import cv2
 import numpy as np
 from calibration.calibration_models import CameraCalibration
 from calibration.calibration_parser import CalibrationParser
@@ -163,7 +164,7 @@ class CalibrationManager:
     def apply_colormap(
         self,
         display_image: np.ndarray,
-        colormap: int,
+        colormap: int = cv2.COLORMAP_INFERNO,
     ) -> np.ndarray:
         return CalibrationProcessor.apply_colormap(
             display_image,

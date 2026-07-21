@@ -4,9 +4,35 @@ camera_discovery.py
 Discovers Fluke TV46L cameras available on the GigE Vision network.
 """
 from __future__ import annotations
+import time
 import halcon as ha
 from camera.camera_info import CameraInfo
+from camera.tv46l_camera import _scalar
 from utilities.logger import logger
+
+
+def _parse_halcon_devices(devices):
+    if not isinstance(devices, tuple) or len(devices) < 2:
+        return []
+    device_list = devices[1]
+    if not isinstance(device_list, (list, tuple)):
+        return []
+    result = []
+    PREFIX = "device:"
+    for entry in device_list:
+        if not isinstance(entry, str):
+            continue
+        idx = entry.find(PREFIX)
+        if idx == -1:
+            continue
+        start = idx + len(PREFIX)
+        end = entry.find(" |", start)
+        if end == -1:
+            end = len(entry)
+        device_str = entry[start:end].strip()
+        if device_str:
+            result.append(device_str)
+    return result
 
 
 class CameraDiscovery:
@@ -23,23 +49,42 @@ class CameraDiscovery:
     def discover(self) -> list[CameraInfo]:
         """
         Scan the network and return all discovered cameras.
+        Retries if only the HALCON info string is returned
+        (common after a recent disconnect).
         """
         self._cameras.clear()
         try:
-            devices = ha.info_framegrabber(
-                "GigEVision2",
-                "device"
-            )
-            if not devices:
+            for attempt in range(3):
+                try:
+                    devices = ha.info_framegrabber(
+                        "GigEVision2",
+                        "device",
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"info_framegrabber failed (attempt {attempt+1}): {exc}"
+                    )
+                    devices = ()
+
+                parsed = _parse_halcon_devices(devices)
+                if parsed:
+                    break
+                if attempt < 2:
+                    logger.info(
+                        f"Re-scanning GigE network (attempt {attempt+1}/3)..."
+                    )
+                    time.sleep(3)
+            else:
                 logger.warning("No GigE Vision cameras found.")
                 return []
-            for device in devices:
+
+            for device in parsed:
                 try:
                     info = self._read_camera(device)
                     if info is not None:
                         self._cameras.append(info)
                 except Exception as exc:
-                    logger.exception(
+                    logger.error(
                         f"Failed to read camera '{device}': {exc}"
                     )
         except Exception as exc:
@@ -86,30 +131,30 @@ class CameraDiscovery:
                 0,
                 -1,
             )
-            serial = ha.get_framegrabber_param(
+            serial = _scalar(ha.get_framegrabber_param(
                 acq,
                 "[Device]DeviceSerialNumber"
-            )
-            model = ha.get_framegrabber_param(
+            ))
+            model = _scalar(ha.get_framegrabber_param(
                 acq,
                 "[Device]DeviceModelName"
-            )
-            vendor = ha.get_framegrabber_param(
+            ))
+            vendor = _scalar(ha.get_framegrabber_param(
                 acq,
                 "[Device]DeviceVendorName"
-            )
-            ip = ha.get_framegrabber_param(
+            ))
+            ip = _scalar(ha.get_framegrabber_param(
                 acq,
                 "[Device]GevDeviceIPAddress"
-            )
-            firmware = ha.get_framegrabber_param(
+            ))
+            firmware = _scalar(ha.get_framegrabber_param(
                 acq,
                 "[Device]DeviceVersion"
-            )
-            user_name = ha.get_framegrabber_param(
+            ))
+            user_name = _scalar(ha.get_framegrabber_param(
                 acq,
                 "[Device]DeviceUserID"
-            )
+            ))
             return CameraInfo(
                 device=device,
                 serial=str(serial),

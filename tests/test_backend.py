@@ -8,15 +8,16 @@ python tests/test_backend.py
 This test verifies that all backend modules are correctly
 connected and can be instantiated.
 """
-import os
 import sys
+import time
+import traceback
+from pathlib import Path
 
-PROJECT_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..")
-)
+import cv2
+import numpy as np
 
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 
 from camera.models.camera_model import CameraModel
 from camera.models.position_model import PositionModel
