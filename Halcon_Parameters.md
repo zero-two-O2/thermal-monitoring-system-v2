@@ -1,3 +1,176 @@
+# HALCON Parameters - Fluke TV46L
+
+## Camera Information
+
+| Property | Value |
+|----------|-------|
+| Vendor | Fluke Process Instruments |
+| Model | TV46L-1-xxxxxxxx@9Hz | --------(Changes depending on camera)
+| Serial Number | HBxxxxxxx |------------(Changes depending on camera)
+| Transport Layer | GigE Vision 2 |
+| Interface | Gigabit Ethernet |
+| Default Stream | IR_Data |
+| Pixel Depth | 16-bit |
+| Resolution | 640 × 480 |
+| Frame Rate | 9 Hz |
+
+---
+
+# Framegrabber
+
+```python
+ha.open_framegrabber(
+    "GigEVision2",
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    "progressive",
+    -1,
+    "default",
+    -1,
+    "false",
+    "default",
+    device,
+    0,
+    -1
+)
+```
+
+---
+
+# Stream Configuration
+
+## Thermal Stream
+Parameter
+```
+FLK_TI_StreamDataSourceSelector
+```
+Value
+```
+IR_Data
+```
+Purpose
+Selects the thermal image stream.
+
+---
+
+## Image Bit Depth
+
+Parameter
+```
+bits_per_channel
+``
+Value
+```
+16
+```
+Purpose
+Receives raw 16-bit thermal image.
+---
+
+## Number of Buffers
+Parameter
+```
+num_buffers
+```
+Recommended
+```
+32
+```
+Purpose
+Internal HALCON acquisition buffers.
+Note:
+Some transport layers may reject this parameter.
+Failure is non-critical.
+---
+# Continuous Acquisition
+Start acquisition
+
+```python
+ha.grab_image_start(acq, -1)
+```
+Grab newest frame
+```python
+image = ha.grab_image_async(acq, 100)
+```
+Convert to NumPy
+```python
+frame = ha.himage_as_numpy_array(image)
+```
+
+---
+
+# NUC (Non-Uniformity Correction)
+
+## Disable Automatic Fine Offset
+Parameter
+```
+FLK_TI_ControlFeature_REControlCmd
+```
+Value
+```
+FLK_TI_ControlFeature_REControlCmd_DisableAutomaticFineOffsets
+```
+Purpose
+Disables automatic shutter corrections.
+
+---
+
+## Request Manual Fine Offset
+Parameter
+```
+FLK_TI_ControlFeature_REControlCmd
+```
+Value
+```
+FLK_TI_ControlFeature_REControlCmd_RequestFineOffset
+```
+Purpose
+Requests a manual NUC.
+
+---
+
+## Execute Manual Fine Offset
+Parameter
+```
+FLK_TI_ControlFeature_REControlCmd
+```
+Value
+```
+FLK_TI_ControlFeature_REControlCmd_ExecuteFineOffset
+```
+Purpose
+Executes the requested NUC.
+Recommended
+```python
+time.sleep(0.05)
+for _ in range(3):
+    ha.grab_image_async(acq, 0)
+```
+This allows the shutter operation to complete and flushes unstable frames.
+
+
+The camera driver is responsible only for:
+
+- Camera connection
+- Camera configuration
+- Frame acquisition
+- Manual NUC
+- Stream statistics
+- Device health
+
+The driver is **not responsible** for:
+
+- Temperature calibration
+- ROI processing
+- Alarm generation
+- Image recording
+- GUI rendering
+
+
 
 ================================================================================
 HB25100004
