@@ -20,6 +20,7 @@ This class DOES NOT perform:
 """
 
 from __future__ import annotations
+import sys
 import threading
 import time
 from datetime import datetime
@@ -280,7 +281,10 @@ class TV46LCamera:
                 self._update_fps()
             except Exception:
                 self._timeout_counter += 1
-                # Don't consume CPU if grabbing fails.
+                logger.exception(
+                    f"{self.serial}: Frame grab failed "
+                    f"(timeout count={self._timeout_counter})"
+                )
                 time.sleep(0.001)
         logger.info(
             f"{self.serial}: Acquisition loop stopped."
@@ -291,18 +295,79 @@ class TV46LCamera:
     # ==========================================================
 
     def _grab_raw_frame(self) -> RawFrame:
-        """
-        Grab one frame from the camera.
-        """
-        image = ha.grab_image_async(
-            self._acq,
-            100,
+        logger.info(f"{self.serial}: _grab_raw_frame - before grab_image_async")
+        try:
+            image = ha.grab_image_async(
+                self._acq,
+                100,
+            )
+            logger.info(f"{self.serial}: _grab_raw_frame - after grab_image_async (success)")
+        except Exception:
+            ex = sys.exc_info()[1]
+            ex_type = type(ex).__name__
+            halcon_err = getattr(ex, 'error_code', 'N/A')
+            halcon_text = ""
+            if halcon_err != 'N/A':
+                try:
+                    halcon_text = ha.get_error_text(halcon_err)
+                except Exception:
+                    halcon_text = "(could not retrieve)"
+            logger.error(
+                f"{self.serial}: grab_image_async FAILED | "
+                f"type={ex_type} | "
+                f"halcon_error_code={halcon_err} | "
+                f"halcon_text={halcon_text} | "
+                f"msg={ex}",
+                exc_info=True,
+            )
+            raise
+
+        logger.info(f"{self.serial}: _grab_raw_frame - before himage_as_numpy_array")
+        try:
+            frame = ha.himage_as_numpy_array(
+                image
+            )
+            logger.info(f"{self.serial}: _grab_raw_frame - after himage_as_numpy_array (success)")
+        except Exception:
+            ex = sys.exc_info()[1]
+            ex_type = type(ex).__name__
+            halcon_err = getattr(ex, 'error_code', 'N/A')
+            halcon_text = ""
+            if halcon_err != 'N/A':
+                try:
+                    halcon_text = ha.get_error_text(halcon_err)
+                except Exception:
+                    halcon_text = "(could not retrieve)"
+            logger.error(
+                f"{self.serial}: himage_as_numpy_array FAILED | "
+                f"type={ex_type} | "
+                f"halcon_error_code={halcon_err} | "
+                f"halcon_text={halcon_text} | "
+                f"msg={ex}",
+                exc_info=True,
+            )
+            raise
+
+        logger.info(
+            f"{self.serial}: frame stats - "
+            f"shape={frame.shape} | "
+            f"dtype={frame.dtype} | "
+            f"min={frame.min()} | "
+            f"max={frame.max()}"
         )
-        frame = ha.himage_as_numpy_array(
-            image
-        )
+
         self._frame_counter += 1
-        return self._latest_frame
+        raw_frame = RawFrame(
+            image=frame.copy(),
+            range_index=0,
+            timestamp=datetime.now(),
+            frame_number=self._frame_counter,
+        )
+        logger.info(
+            f"{self.serial}: _grab_raw_frame - RawFrame created "
+            f"(frame_number={raw_frame.frame_number})"
+        )
+        return raw_frame
 
 
     # ==========================================================
@@ -401,7 +466,6 @@ class TV46LCamera:
             # Give firmware time to finish.
             time.sleep(0.05)
 
-            # Flush unstable frames.
             for _ in range(3):
                 try:
                     ha.grab_image_async(
@@ -409,7 +473,9 @@ class TV46LCamera:
                         0,
                     )
                 except Exception:
-                    pass
+                    logger.warning(
+                        f"{self.serial}: NUC flush grab failed (iteration {_})"
+                    )
         finally:
             self._nuc_requested = False
 
@@ -718,13 +784,16 @@ class TV46LCamera:
         """
         if not self.connected:
             return
-        for _ in range(count):
+        for i in range(count):
             try:
                 ha.grab_image_async(
                     self._acq,
                     0,
                 )
             except Exception:
+                logger.warning(
+                    f"{self.serial}: flush_buffers grab failed (iteration {i})"
+                )
                 break
 
     # ==========================================================

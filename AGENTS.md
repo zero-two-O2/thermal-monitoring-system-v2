@@ -82,26 +82,13 @@ Rules:
 - Never remove previous entries.
 - Update this file after every completed task that modifies code.
 
+## Codebase Memory MCP
 
+Before reading source files:
 
-## Setup And Commands
-- Use Python 3.10.7 if possible; `InfoBook.md` lists the original setup target.
-- `requirements.txt` is empty. Install runtime/test deps manually before verification: `python -m pip install numpy opencv-python PyQt5 pydantic scipy pytest` plus the MVTec HALCON Python package if touching camera hardware code.
-- Run the desktop app with `python main.py`; the real bootstrap is `main.py -> app.application.Application`.
-- Run focused tests with `python -m pytest tests/test_calibration.py` or another file under `tests/`; `python -m pytest tests` is the broad suite.
-- Current checked-in `.venv` may not have `pytest`; verify with `python -m pytest ...` after installing deps.
-- Root `test_tv46l_camera.py` is a real hardware/OpenCV window test for a Fluke TV46L; do not run it unless a camera and HALCON GigEVision2 setup are available.
+1. Use the codebase-memory MCP to understand the repository structure.
+2. Use dependency and call graph queries to locate relevant code.
+3. Read only the files required for the task.
+4. After modifying code, re-query the graph if additional dependencies may be affected.
 
-## Architecture Boundaries
-- GUI must talk to backend through `app.application_controller.ApplicationController`; keep camera hardware access out of `gui/`.
-- HALCON calls should stay in the camera layer, especially `camera/services/halcon_driver.py`; processing code should operate on raw frame/data models only.
-- `CameraFactory` wires one camera runtime: `CameraModel`, `TV46LCamera`, `CalibrationManager`, `ProcessingPipeline`, `ROIProcessor`, `AlarmProcessor`, and `PositionManager` into `CameraContext`.
-- Processing flow is `RawFrame -> CalibrationProcessor -> ProcessedFrame -> ROIProcessor -> AlarmProcessor -> FrameResult` in `processing/pipeline/processing_pipeline.py`.
-- Raw thermal frames are intended to remain immutable; generate display/temperature images separately.
-
-## Repo Gotchas
-- Trust executable code over roadmap prose: `README.md` and `PROJECT_STATUS.md` still contain early-phase/stale status details.
-- Code currently imports `PyQt5` in `app/application.py`; `InfoBook.md` says `PySide6`, but the executable source uses PyQt5.
-- Calibration defaults to `assets/calibration/calibration_blob.txt` via `configuration/settings.py`; calibration and processing tests depend on that file.
-- Camera identity is serial-number centric in docs/models; IP address is network config, not the stable logical identity.
-- `logs/` is gitignored, but importing `utilities.logger` creates `logs/application.log` when logging is enabled.
+Prefer graph queries over full-project searches whenever possible.
