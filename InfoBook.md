@@ -1,14 +1,3 @@
-#Requirnments
-Python 3.10.7
-python -m pip install --upgrade pip
-python -m pip install numpy
-python -m pip install opencv-python
-python -m pip install PySide6
-python -m pip install pydantic
-python -m pip install scipy
-python -m pip install pytest
-
-
 #To create foulder structure
 tree /F /A > docs/project_tree.md
 

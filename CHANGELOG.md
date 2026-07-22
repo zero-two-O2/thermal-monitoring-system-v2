@@ -1,3 +1,68 @@
+## 2026-07-22 16:00
+### What changed
+- Transformed `tests/camera_viewer.py` into professional Phase 1 Camera Qualification Tool (3138 lines).
+- Added per-frame `FrameTimeline` model — each frame tracks its own pipeline timestamps; paint events matched to correct frame by `frame_number` via `FrameHistory.find_by_frame_number()`. Impossible latency values eliminated.
+- Created `tests/qualification/` package with: `frame_timeline.py` (FrameTimeline, TimelineCollector, StageStats), `focus_analyzer.py` (FocusAnalyzer — Laplacian variance + Tenengrad), `nuc_detector.py` (NUCDetector — histogram shift, sharpness recovery, freeze detection), `report_generator.py` (QualificationReportGenerator — text + JSON reports).
+- Added real-time focus quality analysis — Laplacian variance computed every Nth frame; displays numeric score, SHARP/GOOD/SOFT/BLURRY status, trend arrow, automatic warning on sustained degradation.
+- Added NUC event detection — monitors histogram shifts, global brightness changes, sharpness recovery to estimate NUC events; logs probable NUC with timestamp.
+- Replaced minimal overlay with rich camera tile display: serial number, PASS/WARNING/FAIL badge, FPS, latency, dropped frames, timeouts, focus score + status, NUC count, frame number — all readable from several feet.
+- Expanded detail tabs from 4 to 10 sections: Acquisition, Processing, Timing, Transport, Focus, NUC, Health, Resources, Thread, Queue.
+- Transport tab shows all GigE Vision statistics (seen, lost, delivered, unavailable, duplicate, resend packets).
+- All health evaluations return (status, reason) tuples — every PASS/WARNING/FAIL includes explanation.
+- Added Thread tab showing acquisition thread running state, FPS, frame rate.
+- Added Queue tab (future-proofed with N/A placeholders).
+- Added Focus tab with current/average/min/max score, trend, health status.
+- Added NUC tab with event count, last NUC time, average interval, manual NUC button.
+- Added automatic qualification report generation on application closeEvent — saves `Qualification_Report_*.txt` and `*.json` to `reports/` directory with full session data, per-camera metrics, event timeline.
+- Graphs automatically exported as PNG images on close.
+- Event logging expanded: logs NUC events, focus degradation, focus recovery, reconnects, timeouts, stress test changes.
+- All existing pipeline unchanged: TV46LCamera → RawFrame → Calibration → Display → Qt Rendering.
+### Why
+- The timing system previously mixed timestamps from different frames, producing physically impossible latency values.
+- Real-world thermal camera NUC events and focus drift needed automatic detection during long qualification runs.
+- Professional qualification requires comprehensive reporting with clear PASS/WARNING/FAIL reasons.
+- Detail tabs needed to cover all pipeline stages for thorough diagnostics.
+- Report generation must be automatic to prevent data loss on accidental close.
+### Notes
+- FrameTimeline replaces mixed-frame timing: each paint event carries `frame_number` to match to the correct FrameTimeline in history.
+- All new modules in `tests/qualification/` package — no changes to production code.
+- Reports directory created at `reports/` with `.gitkeep`.
+- Manual NUC button is present but disabled by default; can be wired to camera API when NUC command support is confirmed for the specific camera.
+### Files Changed
+- tests/camera_viewer.py (complete rewrite with all new features)
+- tests/qualification/__init__.py (new)
+- tests/qualification/frame_timeline.py (new)
+- tests/qualification/focus_analyzer.py (new)
+- tests/qualification/nuc_detector.py (new)
+- tests/qualification/report_generator.py (new)
+- CHANGELOG.md (updated)
+
+## 2026-07-22 16:00
+### What changed
+- Refactored `tests/camera_viewer.py` from single-camera to multi-camera qualification tool (Phase 1B).
+- Added `CameraContext` dataclass — groups per-camera state: TV46LCamera, QualificationSession, TimingMonitor, FrameHistory, GraphManager, EventLogger, QualificationMonitor, ThermalWidget, tile widget, sequence tracking, frame counts, health status.
+- Added `CameraTileWidget` (extends QFrame) — composite widget containing ThermalWidget + compact info bar displaying: camera name, connection status, FPS, latency, frame number, dropped/timeout count, PASS/WARNING/FAIL.
+- Replaced single-camera `MainWindow` with data-driven `camera_contexts: list[CameraContext]` — all camera operations iterate over the list; no `camera1`/`camera2` patterns.
+- Added dynamic grid layout for 1–8 camera tiles: 1 col for 1 cam, 2 cols for 2–4 cams, 3 cols for 5–6 cams, 4 cols for 7–8 cams.
+- Added per-camera qualification reports via existing `QualificationSession` — each camera generates its own independent report.
+- Added `_generate_system_report()` — aggregates all cameras: connected count, total/average/min/max FPS, total CPU/memory, maximum latency, worst camera identification, overall PASS/WARNING/FAIL.
+- Added camera selector (QComboBox) to switch which camera's detail panels (Acquisition, Processing, Health, Timing) and graphs are displayed.
+- Added system info bar showing aggregate metrics across all cameras.
+- Added per-camera tab system in the qualification report dialog.
+- Independent camera initialization — if one camera fails, remaining cameras continue initializing; failures don't block or cascade.
+- Each camera runs its own acquisition thread (via existing TV46LCamera), own timing collection, own frame history.
+- System-wide event log consolidates per-camera events with camera serial prefix.
+- Updated `closeEvent` to stop/disconnect all cameras independently.
+### Why
+- Phase 1B: qualify and validate the existing camera subsystem under multiple simultaneous cameras using the same production classes (TV46LCamera → RawFrame → Calibration → Display).
+- Validate that the acquisition subsystem scales correctly without introducing a parallel implementation.
+### Notes
+- Uses `CameraDiscovery` from `camera/camera_discovery.py` for full camera info (serial, model, vendor, IP).
+- `CalibrationManager` is shared across all cameras (stateless, read-only).
+- All existing diagnostic classes preserved: StageStats, FrameRecord, FrameHistory, EventLogger, TimingMonitor, GraphManager, GraphWidget, ThermalWidget, QualificationMonitor, HealthEvaluator, QualificationSession, QualificationEngine, AcquisitionPanel, ProcessingPanel, SystemPanel, HealthPanel, TimingTable.
+### Files Changed
+- tests/camera_viewer.py
+
 ## 2026-07-22 14:45
 ### What changed
 - Full engineering audit of camera qualification tool — see ADR-002 for complete review.
