@@ -60,7 +60,13 @@ if _project_root not in sys.path:
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import (
+    QObject,
+    Qt,
+    QThread,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt6.QtGui import QCloseEvent, QImage, QKeyEvent, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -133,6 +139,55 @@ def round_mm(val: Any) -> float | Any:
 
 
 # ==========================================================
+# FocusPoller — background thread worker
+# ==========================================================
+
+class FocusPoller(QObject):
+    """
+    Polls focus distance and temperature in a background thread
+    so blocking GenICam register reads do not freeze the GUI.
+    """
+
+    focus_updated = pyqtSignal(object)  # float | None
+    temp_updated = pyqtSignal(object, object)  # (temp, critical) | (None, None)
+
+    def __init__(self, camera: TV46LCamera,
+                 interval_ms: int = 300) -> None:
+        super().__init__()
+        self._camera = camera
+        self._interval = interval_ms
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._interval)
+        self._timer.timeout.connect(self._poll)
+
+    def start(self) -> None:
+        self._timer.start()
+
+    def stop(self) -> None:
+        self._timer.stop()
+
+    def set_interval(self, ms: int) -> None:
+        self._interval = ms
+        self._timer.setInterval(ms)
+
+    def _poll(self) -> None:
+        try:
+            val = self._camera.get_parameter(
+                _PARAM_CUR_FOCUS
+            )
+            self.focus_updated.emit(round_mm(val))
+        except Exception:
+            self.focus_updated.emit(None)
+
+        try:
+            t = self._camera.device_temperature()
+            ct = self._camera.critical_temperature()
+            self.temp_updated.emit(t, ct)
+        except Exception:
+            self.temp_updated.emit(None, None)
+
+
+# ==========================================================
 # FocusTestDialog
 # ==========================================================
 
@@ -155,6 +210,8 @@ class FocusTestDialog(QWidget):
         self._connected = False
         self._focus_min = 150.0
         self._focus_max = 1000000.0
+        self._focus_poller: FocusPoller | None = None
+        self._poller_thread: QThread | None = None
 
         self._device = device
         self._serial = serial
@@ -291,8 +348,9 @@ class FocusTestDialog(QWidget):
                 )
             buttons.addWidget(btn)
 
-        self._chk_update = QCheckBox("Live focus read")
+        self._chk_update = QCheckBox("Live focus read (bg thread)")
         self._chk_update.setChecked(True)
+        self._chk_update.toggled.connect(self._set_poller_active)
         buttons.addWidget(self._chk_update)
         buttons.addStretch()
         root.addLayout(buttons)
@@ -305,10 +363,6 @@ class FocusTestDialog(QWidget):
         self._frame_timer = QTimer(self)
         self._frame_timer.timeout.connect(self._update_frame)
         self._frame_timer.start(33)
-
-        self._focus_timer = QTimer(self)
-        self._focus_timer.timeout.connect(self._read_focus_loop)
-        self._focus_timer.start(300)
 
     # ---------------------------------------------------------
     # Camera lifecycle
@@ -354,6 +408,7 @@ class FocusTestDialog(QWidget):
                                        int(self._focus_max))
 
             self._log("Camera ready.")
+            self._start_poller()
             self.read_all()
             return True
         except Exception as exc:
@@ -361,12 +416,44 @@ class FocusTestDialog(QWidget):
             return False
 
     def disconnect_camera(self) -> None:
+        self._stop_poller()
         if self._camera is not None:
             try:
                 self._camera.disconnect()
             except Exception:
                 pass
         self._connected = False
+
+    # ---------------------------------------------------------
+    # Background poller thread
+    # ---------------------------------------------------------
+
+    def _start_poller(self) -> None:
+        if self._camera is None:
+            return
+        self._focus_poller = FocusPoller(self._camera, interval_ms=300)
+        self._focus_poller.focus_updated.connect(self._on_focus_updated)
+        self._focus_poller.temp_updated.connect(self._on_temp_updated)
+
+        self._poller_thread = QThread(self)
+        self._focus_poller.moveToThread(self._poller_thread)
+        self._poller_thread.started.connect(self._focus_poller.start)
+        self._poller_thread.start()
+
+    def _stop_poller(self) -> None:
+        if self._focus_poller is not None:
+            self._focus_poller.stop()
+            self._focus_poller = None
+        if self._poller_thread is not None:
+            self._poller_thread.quit()
+            self._poller_thread.wait(2000)
+            self._poller_thread = None
+
+    def _set_poller_active(self, active: bool) -> None:
+        if active and self._focus_poller is not None:
+            self._focus_poller.start()
+        elif self._focus_poller is not None:
+            self._focus_poller.stop()
 
     # ---------------------------------------------------------
     # Live video
@@ -390,36 +477,36 @@ class FocusTestDialog(QWidget):
         self._lbl_fps.setText(f"FPS: {self._camera.get_fps()}")
 
     # ---------------------------------------------------------
-    # Focus reads
+    # Focus reads — run in background thread (FocusPoller),
+    # signals arrive here on the main thread.
     # ---------------------------------------------------------
 
-    def _read_focus_loop(self) -> None:
-        if not self._connected or self._camera is None:
-            return
-        if not self._chk_update.isChecked():
-            return
-        self.read_all()
+    def _on_focus_updated(self, value) -> None:
+        if value is not None:
+            self._lbl_current.setText(f"{value} mm")
+        else:
+            self._lbl_current.setText("FAIL (bg poll)")
+
+    def _on_temp_updated(self, temp, critical) -> None:
+        if temp is not None:
+            self._lbl_temp.setText(
+                f"Temp: {temp:.1f} °C  (critical: {critical:.0f} °C)"
+            )
+        else:
+            self._lbl_temp.setText("Temp: FAIL (bg poll)")
 
     def read_all(self) -> None:
+        """Manual direct read (F5 / init only)."""
         if not self._connected or self._camera is None:
-            return
-        self._read_focus()
-        self._read_temp()
-
-    def _read_focus(self) -> None:
-        if self._camera is None:
             return
         try:
             cur = round_mm(
                 self._camera.get_parameter(_PARAM_CUR_FOCUS)
             )
-            self._lbl_current.setText(f"{cur} mm")
+            self._lbl_current.setText(f"{cur} mm (manual)")
         except Exception as exc:
             self._lbl_current.setText(f"FAIL: {exc}")
 
-    def _read_temp(self) -> None:
-        if self._camera is None:
-            return
         try:
             t = self._camera.device_temperature()
             ct = self._camera.critical_temperature()
@@ -494,7 +581,14 @@ class FocusTestDialog(QWidget):
         except Exception as exc:
             self._lbl_busy.setText(f"ERROR: {exc}")
 
-        self._read_focus()
+        # direct read to confirm (single-shot, user-initiated)
+        try:
+            final = round_mm(
+                self._camera.get_parameter(_PARAM_CUR_FOCUS)
+            )
+            self._lbl_current.setText(f"{final} mm (verify)")
+        except Exception:
+            pass
 
     def step_focus(self, delta: float) -> None:
         if self._camera is None:
