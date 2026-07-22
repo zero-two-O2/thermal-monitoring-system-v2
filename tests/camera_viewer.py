@@ -609,6 +609,9 @@ class CameraTileWidget(QWidget):
         self._timeouts: int = 0
         self._overall_status: str = "UNKNOWN"
         self._error_message: str | None = None
+        self._paint_start: float = 0.0
+        self._paint_finish: float = 0.0
+        self._paint_events: deque[float] = deque(maxlen=128)
 
         self.setObjectName("cameraTile")
         self.setMinimumSize(200, 180)
@@ -748,7 +751,19 @@ class CameraTileWidget(QWidget):
             f"S:{status_text}"
         )
 
+    def drain_paint_events(self) -> list[float]:
+        events = list(self._paint_events)
+        self._paint_events.clear()
+        return events
+
     # ── events ──────────────────────────────────────────────
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        self._paint_start = time.perf_counter()
+        super().paintEvent(event)
+        self._paint_finish = time.perf_counter()
+        paint_ms = (self._paint_finish - self._paint_start) * 1000
+        self._paint_events.append(paint_ms)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -1242,9 +1257,14 @@ class QualificationSession:
             stats = camera.get_stream_statistics()
             lost = int(stats.get("[Stream]GevStreamLostPacketCount", 0))
             resend = int(stats.get("[Stream]GevStreamResendPacketCount", 0))
-            if lost > 100 or resend > 100:
+            seen = int(stats.get("[Stream]GevStreamSeenPacketCount", 0))
+            # On TV46L, "Lost" may include expected UDP drops.
+            # Use ratio relative to total seen packets for context.
+            loss_ratio = lost / max(seen, 1)
+            resend_ratio = resend / max(seen, 1)
+            if loss_ratio > 0.01 or resend_ratio > 0.01:
                 return "FAIL"
-            if lost > 10 or resend > 10:
+            if loss_ratio > 0.001 or resend_ratio > 0.001:
                 return "WARNING"
         except Exception:
             return "UNKNOWN"
@@ -1351,9 +1371,14 @@ class QualificationSession:
         if camera is not None and camera.connected:
             try:
                 stats = camera.get_stream_statistics()
+                seen = int(stats.get("[Stream]GevStreamSeenPacketCount", -1))
                 lost = int(stats.get("[Stream]GevStreamLostPacketCount", -1))
                 resend = int(stats.get("[Stream]GevStreamResendPacketCount", -1))
-                summaries["transport"] = f"Lost: {lost}, Resend: {resend}"
+                dup = int(stats.get("[Stream]GevStreamDuplicatePacketCount", -1))
+                summaries["transport"] = (
+                    f"Seen: {seen}, Lost: {lost}, "
+                    f"Resend: {resend}, Dup: {dup}"
+                )
             except Exception:
                 summaries["transport"] = "Unavailable"
 
@@ -1428,6 +1453,28 @@ class QualificationSession:
             summary = summaries.get(key, "")
             lines.append(f"  {key:22s}  {s:10s}  {summary}")
         lines.append("")
+
+        # ── Per-stage latency breakdown ──
+        stage_keys = ["acquire", "numpy", "publish", "gui_delay",
+                      "display", "colormap", "qimage", "pixmap"]
+        has_stage_data = any(self._per_stage.get(k) for k in stage_keys)
+        if has_stage_data:
+            lines.append("  --- Per-Stage Latency (ms) ---")
+            lines.append(f"  {'Stage':14s} {'Count':>6s} {'Avg':>8s} "
+                         f"{'95th':>8s} {'Min':>8s} {'Max':>8s}")
+            for k in stage_keys:
+                vals = self._per_stage.get(k, [])
+                if vals:
+                    avg = self._mean(vals)
+                    p95 = self._percentile(vals, 95)
+                    mn = min(vals)
+                    mx = max(vals)
+                    lines.append(
+                        f"  {k:14s} {len(vals):>6d} {avg:>8.2f} "
+                        f"{p95:>8.2f} {mn:>8.2f} {mx:>8.2f}"
+                    )
+            lines.append("")
+
         lines.append("-" * 68)
         passed = sum(1 for v in statuses.values() if v == "PASS")
         warned = sum(1 for v in statuses.values() if v == "WARNING")
@@ -1832,6 +1879,9 @@ class PerCameraData:
 
     last_sequence: int = -1
     skipped_frames: int = 0
+    acquisition_drops: int = 0
+    gui_drops: int = 0
+    rendering_drops: int = 0
     update_requests: int = 0
     paint_event_count: int = 0
     gui_frame_count: int = 0
@@ -2179,7 +2229,7 @@ class MainWindow(QMainWindow):
             self._tile_grid.addWidget(self._empty_label, 0, 0)
             return
 
-        cols = 1 if count == 1 else (2 if count <= 4 else (3 if count <= 6 else 4))
+        cols = 1 if count == 1 else (2 if count <= 4 else (3 if count <= 6 else (4 if count <= 8 else 5)))
         for i, serial in enumerate(self._cam_order):
             tile = self._tiles.get(serial)
             if tile is None:
@@ -2204,11 +2254,12 @@ class MainWindow(QMainWindow):
 
         if serial is not None and serial in self._camera_data:
             data = self._camera_data[serial]
-            try:
-                fd = data.camera.get_focus_distance()
-            except Exception:
-                fd = None
+            fd = data.camera.get_focus_distance_or_none()
             self._control_panel.show_selection(serial, fd)
+            if fd is None:
+                self._control_panel._focus_near_btn.setEnabled(False)
+                self._control_panel._focus_far_btn.setEnabled(False)
+                self._control_panel._focus_value_label.setText("N/A mm")
             self._sel_label.setText(f"Selected: {serial}")
             self._status_label.setText(f"Selected: {serial}")
         else:
@@ -2253,9 +2304,11 @@ class MainWindow(QMainWindow):
 
         frame = camera.get_latest_frame_reference()
         if frame is None:
+            data.acquisition_drops += 1
             return
 
         if frame.sequence == data.last_sequence:
+            data.rendering_drops += 1
             return
 
         if (
@@ -2264,8 +2317,9 @@ class MainWindow(QMainWindow):
         ):
             gap = frame.sequence - data.last_sequence - 1
             data.skipped_frames += gap
+            data.acquisition_drops += gap
             self._event_logger.log(
-                f"{serial}: Skipped frame seq {frame.sequence}"
+                f"{serial}: Camera gap — skipped {gap} frame(s)"
             )
         else:
             gap = 0
@@ -2275,25 +2329,41 @@ class MainWindow(QMainWindow):
         data.session.record_frame(gap)
         gui_poll_time = time.perf_counter()
 
+        gst = frame.grab_start_time
+        gct = frame.grab_complete_time
+        nct = frame.numpy_complete_time
+        pt = frame.publish_time
+
+        # ── Stage timing: display → colormap → QImage → QPixmap ──
+        t0 = time.perf_counter()
         try:
             display_image = data.calibration.raw_to_display(frame.image)
+        except Exception:
+            return
+        t1 = time.perf_counter()
+        try:
             color_image = data.calibration.apply_colormap(display_image)
         except Exception:
             return
+        t2 = time.perf_counter()
 
         rgb_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb_image.shape
+        t3 = time.perf_counter()
         qimage = QImage(
             rgb_image.data.tobytes(),
             w, h, ch * w,
             QImage.Format.Format_RGB888,
         )
+        t4 = time.perf_counter()
         pixmap = QPixmap.fromImage(qimage)
+        t5 = time.perf_counter()
 
-        gst = frame.grab_start_time
-        gct = frame.grab_complete_time
-        nct = frame.numpy_complete_time
-        pt = frame.publish_time
+        display_ms = (t1 - t0) * 1000
+        colormap_ms = (t2 - t1) * 1000
+        qimage_ms = (t4 - t3) * 1000
+        pixmap_ms = (t5 - t4) * 1000
+        total_ms = (t5 - gst) * 1000
 
         overlay_latency = (gui_poll_time - gst) * 1000
         tile.set_image(
@@ -2316,18 +2386,29 @@ class MainWindow(QMainWindow):
         numpy_ms = (nct - gct) * 1000
         publish_ms = (pt - nct) * 1000
         gui_delay_ms = (gui_poll_time - pt) * 1000
+        display_colormap_ms = display_ms + colormap_ms
+        qimage_pixmap_ms = qimage_ms + pixmap_ms
 
         ld = {
             "acquire": acquire_ms,
             "numpy": numpy_ms,
             "publish": publish_ms,
             "gui_delay": gui_delay_ms,
+            "display": display_ms,
+            "colormap": colormap_ms,
+            "qimage": qimage_ms,
+            "pixmap": pixmap_ms,
+            "total": total_ms,
         }
         data.timing.update_all(ld)
         for stage, val in ld.items():
             data.session.record_per_stage(stage, val)
+
         data.graph_manager.add_point("acquire", acquire_ms)
         data.graph_manager.add_point("gui_delay", gui_delay_ms)
+        data.graph_manager.add_point("display_colormap", display_colormap_ms)
+        data.graph_manager.add_point("qimage_pixmap", qimage_pixmap_ms)
+        data.graph_manager.add_point("total", total_ms)
         data.graph_manager.add_point(
             "fps", float(camera.get_fps())
         )
@@ -2363,6 +2444,7 @@ class MainWindow(QMainWindow):
 
         data = self._camera_data[self._selected_serial]
         camera = data.camera
+        tile = self._tiles.get(self._selected_serial)
 
         cpu = self._process.cpu_percent()
         memory = self._process.memory_info().rss / 1024 / 1024
@@ -2370,6 +2452,15 @@ class MainWindow(QMainWindow):
         data.session.record_memory(memory)
         data.graph_manager.add_point("cpu", cpu)
         data.graph_manager.add_point("update_rate", float(data.gui_fps))
+
+        # Drain paint events from the selected tile
+        if tile is not None:
+            paint_events = tile.drain_paint_events()
+            for paint_ms in paint_events:
+                data.timing.paint.update(paint_ms)
+                data.graph_manager.add_point("paint", paint_ms)
+                data.session.record_paint(paint_ms)
+            data.paint_event_count += len(paint_events)
 
         self._acquisition_panel.refresh(
             camera,
@@ -2414,17 +2505,20 @@ class MainWindow(QMainWindow):
         )
 
         # Update selected tile status
-        tile = self._tiles.get(self._selected_serial)
         if tile is not None:
             overall = HealthEvaluator.overall(statuses)
             tile._stat_labels["status"].setText(f"S:{overall[:4]}")
 
-        # Update selected cam focus
-        try:
-            fd = camera.get_focus_distance()
+        # Update selected cam focus — handle sentinel
+        fd = camera.get_focus_distance_or_none()
+        if fd is not None:
             self._control_panel.update_focus_distance(fd)
-        except Exception:
-            pass
+            self._control_panel._focus_near_btn.setEnabled(True)
+            self._control_panel._focus_far_btn.setEnabled(True)
+        else:
+            self._control_panel._focus_value_label.setText("N/A mm")
+            self._control_panel._focus_near_btn.setEnabled(False)
+            self._control_panel._focus_far_btn.setEnabled(False)
 
     # ==========================================================
     # Graph Update (200 ms) — selected camera

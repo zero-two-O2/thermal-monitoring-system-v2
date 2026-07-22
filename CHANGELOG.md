@@ -1,3 +1,19 @@
+## 2026-07-22 23:00
+### What changed
+- **Focus sentinel**: Added `FOCUS_UNAVAILABLE_MM = 1000000.0` constant, `focus_available()`, `get_focus_distance_or_none()` to `TV46LCamera`. UI now detects sentinel → disables focus buttons → displays "N/A mm".
+- **Skipped frame counters**: Split single `skipped_frames` into `acquisition_drops` (camera sequence gaps), `gui_drops` (newest-frame-only drops), `rendering_drops` (duplicate sequence frames) in `PerCameraData`.
+- **Rendering/timing instrumentation**: `_poll_one_camera` now times display, colormap, QImage, QPixmap stages and populates `TimingMonitor` + graph series. `CameraTileWidget` overrides `paintEvent` to capture paint timing, drained in `_update_diagnostics`.
+- **Transport stats**: `evaluate_transport` now uses loss_ratio / resend_ratio relative to total seen packets instead of absolute thresholds.
+- **Empty graphs**: Added graph points for `display_colormap`, `qimage_pixmap`, `total`, `paint` series.
+- **Tile layout**: Grid now supports up to 5 columns for 8+ cameras.
+- **Qualification report**: Added per-stage latency breakdown table (acquire, numpy, publish, gui_delay, display, colormap, qimage, pixmap). Transport summary now includes seen/dup counts.
+### Why
+- Fix 9 Phase 1B engineering issues identified during multi-camera qualification testing.
+### Files Changed
+- camera/tv46l_camera.py (focus sentinel detection)
+- tests/camera_viewer.py (9 fixes across MainWindow, CameraTileWidget, PerCameraData, QualificationSession, _poll_one_camera, _update_diagnostics)
+- CHANGELOG.md (updated)
+
 ## 2026-07-22 22:30
 ### What changed
 - Phase 1B changes applied to `tests/camera_viewer.py`: multi-camera support, camera selection, NUC/Focus controls, compact tiles, light theme.

@@ -812,12 +812,35 @@ class TV46LCamera:
     # Focus Control
     # ==========================================================
 
+    # Sentinel value meaning "focus distance unavailable".
+    # HALCON returns this when the camera cannot report focus
+    # (e.g. lens not recognised, focus motor not present).
+    FOCUS_UNAVAILABLE_MM: float = 1000000.0
+
     def get_focus_distance(self) -> float:
         return float(
             self.get_parameter(
                 "FLK_TI_ControlFeature_CurrentFocusDistanceMm"
             )
         )
+
+    def focus_available(self) -> bool:
+        """Returns True if the camera supports focus control."""
+        try:
+            val = self.get_focus_distance()
+            return val < self.FOCUS_UNAVAILABLE_MM - 1.0
+        except Exception:
+            return False
+
+    def get_focus_distance_or_none(self) -> float | None:
+        """Returns focus distance or None if unavailable."""
+        try:
+            val = self.get_focus_distance()
+            if val >= self.FOCUS_UNAVAILABLE_MM - 1.0:
+                return None
+            return val
+        except Exception:
+            return None
 
     def set_focus_distance(self, distance_mm: float) -> None:
         self.set_parameter(
@@ -831,6 +854,8 @@ class TV46LCamera:
         tolerance_mm: float = 10,
         timeout: float = 2.0,
     ) -> bool:
+        if not self.focus_available():
+            return False
         start = time.time()
         while time.time() - start < timeout:
             current = self.get_focus_distance()
