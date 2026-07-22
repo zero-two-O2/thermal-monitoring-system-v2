@@ -1,3 +1,16 @@
+## 2026-07-22 21:00
+### What changed
+- Created `tests/focus_test.py` - standalone PyQt6 GUI tool for live TV46L focus diagnostics.
+- Features: live thermal video, focus distance read/write timing, settle polling, busy detection, categorized step buttons (+25/+250/+1000 mm), slider/spin controls, keyboard shortcuts.
+- Halcon_Parameters.md focus params wired via TV46LCamera.get_parameter/set_parameter.
+- Three discovery modes: explicit CLI args, CameraDiscovery auto-detect, or inline defaults.
+### Why
+- Need a GUI tool to interactively diagnose focus command failure, supplementing CLI diagnose_focus.py.
+### Notes
+- Run: python -m tests.focus_test [--device --serial --model --ip]
+### Files Changed
+- tests/focus_test.py
+
 ## 2026-07-22 16:00
 ### What changed
 - Transformed `tests/camera_viewer.py` into professional Phase 1 Camera Qualification Tool (3138 lines).
