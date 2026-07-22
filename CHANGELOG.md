@@ -1,3 +1,46 @@
+## 2026-07-22 22:30
+### What changed
+- Phase 1B changes applied to `tests/camera_viewer.py`: multi-camera support, camera selection, NUC/Focus controls, compact tiles, light theme.
+- Added `CameraTileWidget` — compact selectable tile with thermal image + compact stats (F, L, S), blue border on select, emits `selected(serial)`.
+- Added `CameraControlPanel` — single panel for all cameras: Execute NUC, << Near / Far >> focus buttons, focus distance display, selected camera info. All disabled when no camera selected.
+- Added `PerCameraData` dataclass — groups per-camera runtime state (TV46LCamera, TimingMonitor, FrameHistory, GraphManager, QualificationSession, QualificationMonitor).
+- Rewrote `MainWindow`: responsive tile grid (1-4 cols based on camera count), left=tiles right=detail panels in horizontal splitter, bottom control panel, light engineering theme stylesheet.
+- Camera selection via tile click: detail panels (tabs, timing table, graphs, event log) show selected camera's data. Qualification Report operates on selected camera.
+- NUC: calls `TV46LCamera.manual_nuc()` (existing API) — never stops acquisition.
+- Focus: discrete buttons, each click reads → calculates → calls `set_focus_distance()` → `wait_for_focus()` → reads back → displays camera-reported value.
+- All camera controls operate exclusively on selected camera.
+### Why
+- Match the production MainWindow qualification tool behavior so camera_viewer.py can test multi-camera NUC/focus validation.
+### Files Changed
+- tests/camera_viewer.py (added CameraTileWidget, CameraControlPanel, PerCameraData; rewrote MainWindow)
+- CHANGELOG.md (updated)
+
+## 2026-07-22 22:00
+- **HalconDriver**: Added `perform_nuc()` (manual NUC via HALCON params), focus API (`get_focus_distance`, `set_focus_distance`, `get_focus_limits`, `wait_for_focus`, `focus_busy`).
+- **Service TV46LCamera**: Added `focus_near()`, `focus_far()`, `get_focus_distance()`, `get_focus_limits()`, `wait_for_focus()` — all delegate to HalconDriver. Fixed missing `_connected` init, fixed status enum usage. No camera control logic duplicated.
+- **CameraStatus enum**: Added `DISCONNECTED`, `STREAMING`, `RUNNING` values.
+- **ApplicationController**: Added `selected_camera_id` / `selected_camera` properties, `select_camera()`, `perform_nuc_selected()`, `focus_near_selected()`, `focus_far_selected()`, `get_focus_distance_selected()`, plus per-camera focus methods.
+- **CameraTile widget** (`gui/widgets/camera_tile.py`): Compact selectable tile — thermal image ~80%, compact status bar (F, S, L, D, T, FPS), click-to-select with blue border + "SELECTED" label, emits `clicked(camera_id)`.
+- **CameraControlPanel** (`gui/widgets/camera_control_panel.py`): Single control panel for all cameras — Execute NUC button, << Near / Far >> focus buttons, current focus distance display, selected camera info. All buttons disabled when no camera selected.
+- **MainWindow** (`gui/main_window.py`): Light engineering theme (light bg, high contrast, neutral colors), responsive grid layout (1-4 cols based on 1-8 cameras), bottom control panel via QSplitter, toolbar (Start All / Stop All), QTimer-based frame polling at 30Hz, status bar with camera count.
+- NUC: calls `HalconDriver.perform_nuc()` — never stops acquisition, never reconnects, never restarts streaming.
+- Focus: buttons only (no slider), each click reads → calculates → calls API → waits → reads back → displays camera-reported value.
+- All camera controls operate exclusively on `selected_camera`, never on every camera.
+### Why
+- Qualification tool needs to validate production camera control APIs (NUC, focus) while acquisition is running, before Phase 2 (ROI → Alarm) begins.
+- Slider-based focus control proved unreliable; replaced with discrete button steps.
+- Dark theme replaced with light engineering theme suitable for industrial environments.
+- Tiles needed space-efficient layout to support 8 cameras comfortably.
+### Files Changed
+- camera/services/halcon_driver.py (added perform_nuc, focus API)
+- camera/services/tv46l_camera.py (added focus API, fixed bugs)
+- camera/models/camera_model.py (added DISCONNECTED, STREAMING, RUNNING statuses)
+- app/application_controller.py (added selected_camera, focus methods)
+- gui/widgets/camera_tile.py (new - compact selectable tile)
+- gui/widgets/camera_control_panel.py (new - single control panel)
+- gui/main_window.py (new - qualification tool main window)
+- CHANGELOG.md (updated)
+
 ## 2026-07-22 21:00
 ### What changed
 - Created `tests/focus_test.py` - standalone PyQt6 GUI tool for live TV46L focus diagnostics.

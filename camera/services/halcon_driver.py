@@ -16,9 +16,9 @@ No threading or image processing is performed here.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
-import numpy as np
 import halcon as ha
 
 from camera.models.camera_model import CameraModel
@@ -33,6 +33,8 @@ class HalconDriver:
     Every HALCON call in the application should go
     through this class.
     """
+
+    FOCUS_STEP_MM = 250
 
     def __init__(
         self,
@@ -214,3 +216,125 @@ class HalconDriver:
     def is_connected(self) -> bool:
 
         return self._connected
+
+    # ==========================================================
+    # NUC
+    # ==========================================================
+
+    def perform_nuc(self) -> None:
+        """
+        Execute manual Non-Uniformity Correction.
+        Does not stop acquisition or restart streaming.
+        """
+
+        logger.info(
+            f"{self.camera.camera_id}: Executing manual NUC."
+        )
+
+        self.set_parameter(
+            "FLK_TI_ControlFeature_REControlCmd",
+            "FLK_TI_ControlFeature_REControlCmd_RequestFineOffset",
+        )
+
+        self.set_parameter(
+            "FLK_TI_ControlFeature_REControlCmd",
+            "FLK_TI_ControlFeature_REControlCmd_ExecuteFineOffset",
+        )
+
+        time.sleep(0.05)
+
+        #
+        # Flush stale frames after NUC.
+        #
+
+        for _ in range(3):
+            try:
+                ha.grab_image_async(
+                    self._framegrabber,
+                    0,
+                )
+            except Exception:
+                logger.warning(
+                    f"{self.camera.camera_id}: "
+                    f"NUC flush grab failed (iteration {_})"
+                )
+
+    # ==========================================================
+    # Focus Control
+    # ==========================================================
+
+    def get_focus_distance(self) -> float:
+        """
+        Read current focus distance in mm.
+        """
+
+        return float(
+            self.get_parameter(
+                "FLK_TI_ControlFeature_CurrentFocusDistanceMm"
+            )
+        )
+
+    def set_focus_distance(
+        self,
+        distance_mm: float,
+    ) -> None:
+
+        self.set_parameter(
+            "FLK_TI_ControlFeature_SetFocusDistanceMm",
+            distance_mm,
+        )
+
+    def get_focus_limits(self) -> tuple[float, float]:
+        """
+        Return (min_mm, max_mm) focus limits.
+        """
+
+        return (
+            float(
+                self.get_parameter(
+                    "FLK_TI_ControlFeature_FocusDistanceMm_Min"
+                )
+            ),
+            float(
+                self.get_parameter(
+                    "FLK_TI_ControlFeature_FocusDistanceMm_Max"
+                )
+            ),
+        )
+
+    def wait_for_focus(
+        self,
+        target_mm: float,
+        tolerance_mm: float = 10,
+        timeout: float = 2.0,
+    ) -> bool:
+        """
+        Wait until focus reaches target distance.
+        Returns True if target reached within timeout.
+        """
+
+        start = time.time()
+
+        while time.time() - start < timeout:
+
+            current = self.get_focus_distance()
+
+            if abs(current - target_mm) <= tolerance_mm:
+                return True
+
+            time.sleep(0.02)
+
+        return False
+
+    def focus_busy(self) -> bool:
+        """
+        Returns True if focus is currently moving.
+        """
+
+        a = self.get_focus_distance()
+
+        time.sleep(0.05)
+
+        b = self.get_focus_distance()
+
+        return abs(b - a) > 1.0

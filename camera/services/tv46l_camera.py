@@ -42,9 +42,17 @@ class TV46LCamera:
 
         perform_nuc()
 
+        focus_near()
+        focus_far()
+        get_focus_distance()
+        get_focus_limits()
+        wait_for_focus()
+
         is_connected()
         is_running()
     """
+
+    FOCUS_STEP_MM = 250
 
     def __init__(
         self,
@@ -62,6 +70,7 @@ class TV46LCamera:
 
         self.calibration = calibration_manager
 
+        self._connected = False
 
     # ---------------------------------------------------------
     # Connection
@@ -152,8 +161,96 @@ class TV46LCamera:
     # ---------------------------------------------------------
 
     def perform_nuc(self) -> None:
+        """
+        Execute manual Non-Uniformity Correction.
+
+        Does NOT stop acquisition or restart streaming.
+        Only the selected camera pauses briefly during NUC.
+        """
 
         self.driver.perform_nuc()
+
+    # ---------------------------------------------------------
+    # Focus Control
+    # ---------------------------------------------------------
+
+    def focus_near(
+        self,
+        step_mm: int | None = None,
+    ) -> tuple[float, float]:
+        """
+        Move focus closer by step_mm.
+
+        Returns (requested_mm, actual_mm) after movement completes.
+        """
+
+        if step_mm is None:
+            step_mm = self.FOCUS_STEP_MM
+
+        current = self.driver.get_focus_distance()
+        limits = self.driver.get_focus_limits()
+        target = max(current - step_mm, limits[0])
+
+        self.driver.set_focus_distance(target)
+        self.driver.wait_for_focus(target)
+
+        actual = self.driver.get_focus_distance()
+
+        return (target, actual)
+
+    def focus_far(
+        self,
+        step_mm: int | None = None,
+    ) -> tuple[float, float]:
+        """
+        Move focus farther by step_mm.
+
+        Returns (requested_mm, actual_mm) after movement completes.
+        """
+
+        if step_mm is None:
+            step_mm = self.FOCUS_STEP_MM
+
+        current = self.driver.get_focus_distance()
+        limits = self.driver.get_focus_limits()
+        target = min(current + step_mm, limits[1])
+
+        self.driver.set_focus_distance(target)
+        self.driver.wait_for_focus(target)
+
+        actual = self.driver.get_focus_distance()
+
+        return (target, actual)
+
+    def get_focus_distance(self) -> float:
+        """
+        Read current focus distance in mm.
+        """
+
+        return self.driver.get_focus_distance()
+
+    def get_focus_limits(self) -> tuple[float, float]:
+        """
+        Return (min_mm, max_mm) focus limits.
+        """
+
+        return self.driver.get_focus_limits()
+
+    def wait_for_focus(
+        self,
+        target_mm: float,
+        tolerance_mm: float = 10,
+        timeout: float = 2.0,
+    ) -> bool:
+        """
+        Wait until focus reaches target distance.
+        """
+
+        return self.driver.wait_for_focus(
+            target_mm,
+            tolerance_mm,
+            timeout,
+        )
 
     # ---------------------------------------------------------
     # Information
@@ -161,7 +258,14 @@ class TV46LCamera:
 
     def get_camera_information(self) -> dict:
 
-        return self.driver.get_camera_information()
+        return {
+            "camera_id": self.camera.camera_id,
+            "model": self.camera.model,
+            "serial_number": self.camera.serial_number,
+            "ip_address": self.camera.ip_address,
+            "vendor": self.camera.vendor,
+            "connected": self._connected,
+        }
 
     def get_stream_statistics(self) -> dict:
 
@@ -183,11 +287,11 @@ class TV46LCamera:
 
     def is_connected(self) -> bool:
 
-        return self.camera.status == CameraStatus.CONNECTED
+        return self._connected
 
     def is_running(self) -> bool:
 
-        return self.camera.status == CameraStatus.RUNNING
+        return self.acquisition.is_running()
 
     # ---------------------------------------------------------
     # Context Manager

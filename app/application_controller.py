@@ -30,6 +30,8 @@ class ApplicationController:
         self._initialized = False
         self._running = False
 
+        self._selected_camera_id: str | None = None
+
     # ======================================================
     # Properties
     # ======================================================
@@ -104,6 +106,53 @@ class ApplicationController:
         """
 
         return self._camera_manager.get_all_cameras()
+
+    # ======================================================
+    # Selected Camera
+    # ======================================================
+
+    @property
+    def selected_camera_id(self) -> str | None:
+        """
+        Return the currently selected camera ID.
+        """
+
+        return self._selected_camera_id
+
+    @property
+    def selected_camera(self) -> CameraContext | None:
+        """
+        Return the currently selected camera context.
+        """
+
+        if self._selected_camera_id is None:
+            return None
+
+        return self.get_camera(
+            self._selected_camera_id
+        )
+
+    def select_camera(
+        self,
+        camera_id: str | None,
+    ) -> None:
+        """
+        Select a camera by ID.
+
+        Pass None to clear selection.
+        """
+
+        if camera_id is not None:
+
+            context = self.get_camera(camera_id)
+
+            if context is None:
+
+                raise ValueError(
+                    f"Camera '{camera_id}' not found."
+                )
+
+        self._selected_camera_id = camera_id
 
     # ======================================================
     # Bulk Operations
@@ -241,6 +290,118 @@ class ApplicationController:
             raise ValueError(f"Camera '{camera_id}' not found.")
 
         context.camera.perform_nuc()
+
+    def perform_nuc_selected(self) -> None:
+        """
+        Perform NUC on the currently selected camera.
+        """
+
+        if self.selected_camera is None:
+            raise RuntimeError("No camera selected.")
+
+        self.selected_camera.camera.perform_nuc()
+
+    # ======================================================
+    # Focus Control
+    # ======================================================
+
+    def focus_near(
+        self,
+        camera_id: str,
+        step_mm: int | None = None,
+    ) -> tuple[float, float]:
+        """
+        Move focus closer on a camera.
+        """
+
+        context = self.get_camera(camera_id)
+
+        if context is None:
+            raise ValueError(f"Camera '{camera_id}' not found.")
+
+        return context.camera.focus_near(step_mm)
+
+    def focus_far(
+        self,
+        camera_id: str,
+        step_mm: int | None = None,
+    ) -> tuple[float, float]:
+        """
+        Move focus farther on a camera.
+        """
+
+        context = self.get_camera(camera_id)
+
+        if context is None:
+            raise ValueError(f"Camera '{camera_id}' not found.")
+
+        return context.camera.focus_far(step_mm)
+
+    def focus_near_selected(
+        self,
+        step_mm: int | None = None,
+    ) -> tuple[float, float]:
+        """
+        Move focus closer on the selected camera.
+        """
+
+        if self.selected_camera is None:
+            raise RuntimeError("No camera selected.")
+
+        return self.selected_camera.camera.focus_near(step_mm)
+
+    def focus_far_selected(
+        self,
+        step_mm: int | None = None,
+    ) -> tuple[float, float]:
+        """
+        Move focus farther on the selected camera.
+        """
+
+        if self.selected_camera is None:
+            raise RuntimeError("No camera selected.")
+
+        return self.selected_camera.camera.focus_far(step_mm)
+
+    def get_focus_distance(
+        self,
+        camera_id: str,
+    ) -> float:
+        """
+        Read current focus distance.
+        """
+
+        context = self.get_camera(camera_id)
+
+        if context is None:
+            raise ValueError(f"Camera '{camera_id}' not found.")
+
+        return context.camera.get_focus_distance()
+
+    def get_focus_distance_selected(self) -> float:
+        """
+        Read focus distance on the selected camera.
+        """
+
+        if self.selected_camera is None:
+            raise RuntimeError("No camera selected.")
+
+        return self.selected_camera.camera.get_focus_distance()
+
+    def get_focus_limits(
+        self,
+        camera_id: str,
+    ) -> tuple[float, float]:
+        """
+        Return focus limits for a camera.
+        """
+
+        context = self.get_camera(camera_id)
+
+        if context is None:
+            raise ValueError(f"Camera '{camera_id}' not found.")
+
+        return context.camera.get_focus_limits()
 
     def enable_camera(
         self,

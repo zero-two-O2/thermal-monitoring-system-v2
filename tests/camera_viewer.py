@@ -29,7 +29,7 @@ import cv2
 import halcon as ha
 import numpy as np
 import psutil
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -53,6 +53,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QStatusBar,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -554,6 +555,377 @@ class ThermalWidget(QWidget):
                 self.paint_total_latency,
                 self.paint_update_delay,
             ))
+
+
+# ==========================================================
+# CameraTileWidget
+# ==========================================================
+
+
+class CameraTileWidget(QWidget):
+    """
+    Compact selectable camera tile for multi-camera grid.
+
+    Displays thermal image (~80%) + compact stats bar.
+    Click to select — emits selected(camera_serial).
+    """
+
+    selected = pyqtSignal(str)
+
+    TILE_STYLE_DEFAULT = """
+    QWidget#cameraTile {
+        background-color: #F5F5F5;
+        border: 2px solid #CCCCCC;
+        border-radius: 4px;
+    }
+    QWidget#cameraTile:hover {
+        border: 2px solid #999999;
+    }
+    """
+
+    TILE_STYLE_SELECTED = """
+    QWidget#cameraTile {
+        background-color: #E8F0FE;
+        border: 3px solid #1A73E8;
+        border-radius: 4px;
+    }
+    """
+
+    def __init__(
+        self,
+        serial: str,
+        camera_name: str,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+
+        self._serial = serial
+        self._camera_name = camera_name
+        self._selected = False
+        self._pixmap: QPixmap | None = None
+        self._frame_number: int = 0
+        self._fps: int = 0
+        self._latency_ms: float = 0.0
+        self._timeouts: int = 0
+        self._overall_status: str = "UNKNOWN"
+        self._error_message: str | None = None
+
+        self.setObjectName("cameraTile")
+        self.setMinimumSize(200, 180)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(self.TILE_STYLE_DEFAULT)
+
+        self._build_ui()
+
+    # ── properties ──────────────────────────────────────────
+
+    @property
+    def serial(self) -> str:
+        return self._serial
+
+    @property
+    def is_selected(self) -> bool:
+        return self._selected
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = selected
+        self.setStyleSheet(
+            self.TILE_STYLE_SELECTED if selected else self.TILE_STYLE_DEFAULT
+        )
+        self._selected_label.setVisible(selected)
+
+    # ── ui ──────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(2)
+
+        header = QHBoxLayout()
+        header.setSpacing(4)
+
+        name = QLabel(self._camera_name)
+        name.setStyleSheet(
+            "color: #1A1A1A; font-size: 11px; font-weight: bold;"
+        )
+        header.addWidget(name)
+        header.addStretch()
+
+        self._selected_label = QLabel("SELECTED")
+        self._selected_label.setStyleSheet(
+            "color: #1A73E8; font-weight: bold; font-size: 9px;"
+        )
+        self._selected_label.setVisible(False)
+        header.addWidget(self._selected_label)
+
+        layout.addLayout(header)
+
+        self._image_label = QLabel()
+        self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image_label.setStyleSheet(
+            "background-color: #E0E0E0; border: 1px solid #CCCCCC;"
+        )
+        layout.addWidget(self._image_label, stretch=1)
+
+        stats = QHBoxLayout()
+        stats.setSpacing(6)
+
+        self._stat_labels: dict[str, QLabel] = {}
+        for key, fmt in [
+            ("frame", "F:0"),
+            ("latency", "L:0ms"),
+            ("status", "S:??"),
+        ]:
+            label = QLabel(fmt)
+            label.setStyleSheet(
+                "color: #333333; font-size: 10px;"
+                "font-family: 'Consolas', 'Courier New', monospace;"
+            )
+            stats.addWidget(label)
+            self._stat_labels[key] = label
+
+        layout.addLayout(stats)
+
+    # ── update ──────────────────────────────────────────────
+
+    def set_image(
+        self,
+        pixmap: QPixmap,
+        frame_number: int,
+        fps: int,
+        latency_ms: float,
+        timeouts: int,
+        status: str,
+    ) -> None:
+        self._pixmap = pixmap
+        self._frame_number = frame_number
+        self._fps = fps
+        self._latency_ms = latency_ms
+        self._timeouts = timeouts
+        self._overall_status = status
+        self._error_message = None
+        self._update_display()
+
+    def show_error(self, message: str) -> None:
+        self._pixmap = None
+        self._error_message = message
+        self._update_display()
+
+    def _update_display(self) -> None:
+        if self._error_message is not None:
+            self._image_label.setText(self._error_message)
+            self._image_label.setStyleSheet(
+                "color: #CC0000; background-color: #E0E0E0;"
+                "border: 1px solid #CCCCCC; font-size: 10px;"
+            )
+            return
+
+        if self._pixmap is not None and not self._pixmap.isNull():
+            scaled = self._pixmap.scaled(
+                self._image_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._image_label.setPixmap(scaled)
+            self._image_label.setStyleSheet(
+                "background-color: #E0E0E0; border: 1px solid #CCCCCC;"
+            )
+        else:
+            self._image_label.setText("No frame")
+            self._image_label.setStyleSheet(
+                "color: #999999; background-color: #E0E0E0;"
+                "border: 1px solid #CCCCCC; font-size: 10px;"
+            )
+
+        self._stat_labels["frame"].setText(
+            f"F:{self._frame_number}"
+        )
+        self._stat_labels["latency"].setText(
+            f"L:{self._latency_ms:.0f}ms"
+        )
+        status_text = self._overall_status[:4]
+        self._stat_labels["status"].setText(
+            f"S:{status_text}"
+        )
+
+    # ── events ──────────────────────────────────────────────
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._update_display()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        self.selected.emit(self._serial)
+        super().mousePressEvent(event)
+
+
+# ==========================================================
+# CameraControlPanel
+# ==========================================================
+
+
+class CameraControlPanel(QFrame):
+    """
+    Single control panel for the selected camera.
+
+    Manual NUC button + Focus Near/Far buttons + focus distance.
+    """
+
+    nuc_clicked = pyqtSignal()
+    focus_near_clicked = pyqtSignal()
+    focus_far_clicked = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+
+        self.setObjectName("controlPanel")
+        self.setStyleSheet("""
+        QFrame#controlPanel {
+            background-color: #FAFAFA;
+            border: 1px solid #D0D0D0;
+            border-radius: 4px;
+        }
+        """)
+
+        self._build_ui()
+        self.clear_selection()
+
+    def _build_ui(self) -> None:
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(12)
+
+        title = QLabel("Camera Control")
+        title.setStyleSheet(
+            "font-size: 12px; font-weight: bold; color: #1A1A1A;"
+        )
+        layout.addWidget(title)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setStyleSheet("color: #D0D0D0;")
+        layout.addWidget(sep)
+
+        self._selected_label = QLabel("No camera selected")
+        self._selected_label.setStyleSheet(
+            "color: #1A73E8; font-size: 12px; font-weight: bold;"
+        )
+        layout.addWidget(self._selected_label)
+
+        layout.addStretch()
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.VLine)
+        sep2.setStyleSheet("color: #D0D0D0;")
+        layout.addWidget(sep2)
+
+        nuc_label = QLabel("NUC:")
+        nuc_label.setStyleSheet(
+            "color: #555555; font-size: 11px; font-weight: bold;"
+        )
+        layout.addWidget(nuc_label)
+
+        self._nuc_button = QPushButton("Execute NUC")
+        self._nuc_button.setStyleSheet("""
+        QPushButton {
+            background-color: #E8F0FE; color: #1A73E8;
+            border: 1px solid #1A73E8; border-radius: 3px;
+            padding: 4px 16px; font-size: 11px; font-weight: bold;
+        }
+        QPushButton:hover { background-color: #D2E3FC; }
+        QPushButton:disabled {
+            background-color: #F0F0F0; color: #AAAAAA;
+            border: 1px solid #CCCCCC;
+        }
+        """)
+        self._nuc_button.clicked.connect(self._on_nuc)
+        layout.addWidget(self._nuc_button)
+
+        sep3 = QFrame()
+        sep3.setFrameShape(QFrame.Shape.VLine)
+        sep3.setStyleSheet("color: #D0D0D0;")
+        layout.addWidget(sep3)
+
+        focus_label = QLabel("Focus:")
+        focus_label.setStyleSheet(
+            "color: #555555; font-size: 11px; font-weight: bold;"
+        )
+        layout.addWidget(focus_label)
+
+        self._focus_near_btn = QPushButton("<< Near")
+        self._focus_near_btn.setStyleSheet("""
+        QPushButton {
+            background-color: #F0F0F0; color: #333333;
+            border: 1px solid #CCCCCC; border-radius: 3px;
+            padding: 4px 12px; font-size: 11px; font-weight: bold;
+        }
+        QPushButton:hover { background-color: #E0E0E0; }
+        QPushButton:disabled {
+            background-color: #F0F0F0; color: #AAAAAA;
+            border: 1px solid #CCCCCC;
+        }
+        """)
+        self._focus_near_btn.clicked.connect(self._on_focus_near)
+        layout.addWidget(self._focus_near_btn)
+
+        self._focus_far_btn = QPushButton("Far >>")
+        self._focus_far_btn.setStyleSheet(self._focus_near_btn.styleSheet())
+        self._focus_far_btn.clicked.connect(self._on_focus_far)
+        layout.addWidget(self._focus_far_btn)
+
+        self._focus_value_label = QLabel("--- mm")
+        self._focus_value_label.setStyleSheet(
+            "color: #1A1A1A; font-size: 13px; font-weight: bold;"
+            "font-family: 'Consolas', 'Courier New', monospace;"
+        )
+        layout.addWidget(self._focus_value_label)
+
+    # ── selection ──────────────────────────────────────────
+
+    def show_selection(
+        self,
+        serial: str,
+        focus_distance: float | None = None,
+    ) -> None:
+        self._selected_label.setText(f"Selected: {serial}")
+        self._nuc_button.setEnabled(True)
+        self._focus_near_btn.setEnabled(True)
+        self._focus_far_btn.setEnabled(True)
+        if focus_distance is not None:
+            self._focus_value_label.setText(f"{focus_distance:.0f} mm")
+        else:
+            self._focus_value_label.setText("--- mm")
+
+    def update_focus_distance(self, distance_mm: float) -> None:
+        self._focus_value_label.setText(f"{distance_mm:.0f} mm")
+
+    def clear_selection(self) -> None:
+        self._selected_label.setText("No camera selected")
+        self._nuc_button.setEnabled(False)
+        self._focus_near_btn.setEnabled(False)
+        self._focus_far_btn.setEnabled(False)
+        self._focus_value_label.setText("--- mm")
+
+    def set_nuc_busy(self, busy: bool) -> None:
+        self._nuc_button.setEnabled(not busy)
+        self._nuc_button.setText(
+            "NUC..." if busy else "Execute NUC"
+        )
+
+    def set_focus_busy(self, busy: bool) -> None:
+        self._focus_near_btn.setEnabled(not busy)
+        self._focus_far_btn.setEnabled(not busy)
+
+    # ── slots ──────────────────────────────────────────────
+
+    def _on_nuc(self) -> None:
+        self.nuc_clicked.emit()
+
+    def _on_focus_near(self) -> None:
+        self.focus_near_clicked.emit()
+
+    def _on_focus_far(self) -> None:
+        self.focus_far_clicked.emit()
 
 
 # ==========================================================
@@ -1441,40 +1813,124 @@ class TimingTable(QWidget):
 # ==========================================================
 
 
+# ==========================================================
+# PerCameraData
+# ==========================================================
+
+
+@dataclass
+class PerCameraData:
+    """Runtime data for one camera in the multi-camera viewer."""
+
+    camera: TV46LCamera
+    calibration: CalibrationManager
+    timing: TimingMonitor
+    frame_history: FrameHistory
+    graph_manager: GraphManager
+    session: QualificationSession
+    monitor: QualificationMonitor
+
+    last_sequence: int = -1
+    skipped_frames: int = 0
+    update_requests: int = 0
+    paint_event_count: int = 0
+    gui_frame_count: int = 0
+    gui_fps: int = 0
+    gui_fps_timer: float = field(default_factory=time.time)
+    last_timeout_count: int = 0
+    last_error: str | None = None
+
+
+# ==========================================================
+# Light Theme
+# ==========================================================
+
+LIGHT_THEME = """
+QMainWindow { background-color: #FFFFFF; }
+QWidget {
+    background-color: #FFFFFF;
+    color: #1A1A1A;
+    font-family: "Segoe UI", "Arial", sans-serif;
+    font-size: 11px;
+}
+QPushButton {
+    background-color: #F0F0F0; color: #333333;
+    border: 1px solid #CCCCCC; border-radius: 3px;
+    padding: 5px 14px; font-size: 11px;
+}
+QPushButton:hover { background-color: #E0E0E0; border: 1px solid #999999; }
+QPushButton:pressed { background-color: #D0D0D0; }
+QPushButton:disabled {
+    background-color: #F5F5F5; color: #AAAAAA;
+    border: 1px solid #DDDDDD;
+}
+QTabWidget::pane {
+    background-color: #FAFAFA; border: 1px solid #D0D0D0;
+}
+QTabBar::tab {
+    background-color: #F0F0F0; color: #555555;
+    border: 1px solid #D0D0D0; padding: 4px 12px;
+}
+QTabBar::tab:selected {
+    background-color: #FAFAFA; color: #1A1A1A;
+    border-bottom: 2px solid #1A73E8;
+}
+QTableWidget {
+    background-color: #FAFAFA; border: 1px solid #D0D0D0;
+    gridline-color: #E0E0E0;
+}
+QHeaderView::section {
+    background-color: #F0F0F0; color: #333333;
+    border: 1px solid #D0D0D0; padding: 2px 6px;
+}
+QListWidget {
+    background-color: #FAFAFA; border: 1px solid #D0D0D0;
+    color: #333333;
+}
+QCheckBox { color: #333333; }
+QGroupBox { color: #333333; }
+QSplitter::handle { background-color: #D0D0D0; }
+QStatusBar {
+    background-color: #F5F5F5; border-top: 1px solid #D0D0D0;
+    color: #555555; font-size: 10px;
+}
+"""
+
+
+# ==========================================================
+# MainWindow
+# ==========================================================
+
+
 class MainWindow(QMainWindow):
+    """
+    Multi-camera qualification tool main window.
+
+    Layout:
+      Top: Toolbar
+      Middle: Tile grid (responsive) + Detail panels (selected cam)
+      Bottom: CameraControlPanel (NUC, Focus)
+      Status Bar
+    """
+
     def __init__(self) -> None:
         super().__init__()
-        self._camera: TV46LCamera | None = None
-        self._calibration = CalibrationManager()
-        self._timing = TimingMonitor()
-        self._frame_history = FrameHistory()
-        self._graph_manager = GraphManager()
-        self._event_logger = EventLogger()
-        self._qualification = QualificationEngine()
-        self._monitor = QualificationMonitor()
-        self._session = QualificationSession()
+
+        self._camera_data: dict[str, PerCameraData] = {}
+        self._tiles: dict[str, CameraTileWidget] = {}
+        self._cam_order: list[str] = []
+        self._selected_serial: str | None = None
         self._process = psutil.Process()
 
-        self._last_sequence: int = -1
-        self._skipped_frames: int = 0
-        self._update_requests: int = 0
-        self._paint_event_count: int = 0
-        self._gui_frame_count: int = 0
-        self._gui_fps: int = 0
-        self._gui_fps_timer: float = time.time()
-        self._last_console_time: float = time.time()
+        self._nuc_busy: bool = False
+        self._focus_busy: bool = False
         self._stress_test_enabled: bool = False
-        self._stress_paint_count: int = 0
-        self._acquisition_start_time: float = 0.0
-        self._last_timeout_count: int = 0
 
         self._graph_widgets: list[GraphWidget] = []
+        self._event_logger = EventLogger()
 
         self._init_ui()
-        self._init_camera()
-        if self._camera_error is not None:
-            self._thermal_widget.show_error(self._camera_error)
-            self._event_logger.log(f"Camera init failed: {self._camera_error}")
+        self._init_cameras()
         self._init_timers()
 
     # ==========================================================
@@ -1482,39 +1938,65 @@ class MainWindow(QMainWindow):
     # ==========================================================
 
     def _init_ui(self) -> None:
-        self.setWindowTitle("TV46L Camera Viewer — Qualification Mode")
-        self.setMinimumSize(1024, 768)
+        self.setWindowTitle("TV46L Camera Viewer — Multi-Camera Qualification")
+        self.setMinimumSize(1280, 860)
+        self.setStyleSheet(LIGHT_THEME)
 
         central = QWidget()
         self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(4, 4, 4, 4)
-        main_layout.setSpacing(4)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(4)
 
-        self._thermal_widget = ThermalWidget()
-        main_layout.addWidget(self._thermal_widget, stretch=1)
+        # ── Toolbar ──────────────────────────────────────────
 
-        overlay = QFrame()
-        overlay.setFrameStyle(QFrame.Shape.StyledPanel)
-        overlay_layout = QHBoxLayout(overlay)
-        overlay_layout.setContentsMargins(8, 2, 8, 2)
-        self._overlay_labels: dict[str, QLabel] = {}
-        for key, text in [
-            ("frame", "Frame: --"),
-            ("fps", "FPS: --"),
-            ("latency", "Lat: -- ms"),
-            ("status", "Status: --"),
-        ]:
-            label = QLabel(text)
-            label.setFont(QFont("monospace", 10, QFont.Weight.Bold))
-            overlay_layout.addWidget(label)
-            self._overlay_labels[key] = label
-        overlay_layout.addStretch()
-        self._status_indicator = QLabel("●")
-        self._status_indicator.setFont(QFont("monospace", 14))
-        self._status_indicator.setStyleSheet("color: gray;")
-        overlay_layout.addWidget(self._status_indicator)
-        main_layout.addWidget(overlay)
+        toolbar = QFrame()
+        toolbar.setStyleSheet(
+            "background-color: #F5F5F5; border: 1px solid #D0D0D0;"
+            "border-radius: 3px;"
+        )
+        tb = QHBoxLayout(toolbar)
+        tb.setContentsMargins(8, 4, 8, 4)
+        tb.setSpacing(6)
+
+        title = QLabel("Multi-Camera Qualification Tool")
+        title.setStyleSheet(
+            "font-size: 13px; font-weight: bold; color: #1A1A1A;"
+        )
+        tb.addWidget(title)
+        tb.addSpacing(12)
+
+        self._stress_checkbox = QCheckBox("Stress Test")
+        self._stress_checkbox.toggled.connect(self._on_stress_toggled)
+        tb.addWidget(self._stress_checkbox)
+        tb.addStretch()
+
+        self._qual_button = QPushButton("Qualification Report")
+        self._qual_button.clicked.connect(self._show_qualification_report)
+        tb.addWidget(self._qual_button)
+
+        root.addWidget(toolbar)
+
+        # ── Splitter: Tile Grid + Detail Panels ──────────────
+
+        hsplitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # Left: Tile grid
+        tile_container = QWidget()
+        self._tile_grid = QGridLayout(tile_container)
+        self._tile_grid.setContentsMargins(0, 0, 0, 0)
+        self._tile_grid.setSpacing(4)
+        self._empty_label = QLabel("No cameras detected.\n\nConnect cameras and restart.")
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setStyleSheet("color: #999999; font-size: 14px;")
+        self._tile_grid.addWidget(self._empty_label, 0, 0)
+        hsplitter.addWidget(tile_container)
+
+        # Right: Detail panels for selected camera
+        detail_panel = QWidget()
+        detail_layout = QVBoxLayout(detail_panel)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(4)
 
         self._tab_widget = QTabWidget()
         self._acquisition_panel = AcquisitionPanel()
@@ -1525,16 +2007,17 @@ class MainWindow(QMainWindow):
         self._tab_widget.addTab(self._processing_panel, "Processing")
         self._tab_widget.addTab(self._system_panel, "System")
         self._tab_widget.addTab(self._health_panel, "Health")
-        main_layout.addWidget(self._tab_widget)
+        detail_layout.addWidget(self._tab_widget)
 
         self._timing_table = TimingTable()
-        self._timing_table.setMaximumHeight(220)
-        main_layout.addWidget(self._timing_table)
+        self._timing_table.setMaximumHeight(180)
+        detail_layout.addWidget(self._timing_table)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        # Graphs + Event log
+        gsplitter = QSplitter(Qt.Orientation.Horizontal)
         graph_container = QWidget()
         graph_layout = QGridLayout(graph_container)
-        graph_layout.setSpacing(2)
+        graph_layout.setSpacing(1)
         graph_titles = [
             "Total Latency", "Acquire Time", "Display+Colormap",
             "QImage+Pixmap", "GUI Delay", "Paint Time",
@@ -1549,69 +2032,189 @@ class MainWindow(QMainWindow):
         for idx, (title, key) in enumerate(zip(graph_titles, graph_keys)):
             gw = GraphWidget(title)
             gw.set_range(0, 100)
-            gw.set_series(key, [], GraphWidget.COLORS.get(key, QColor(255, 255, 255)))
+            gw.set_series(
+                key, [],
+                GraphWidget.COLORS.get(key, QColor(255, 255, 255)),
+            )
             graph_layout.addWidget(gw, idx // 3, idx % 3)
             self._graph_widgets.append(gw)
-        splitter.addWidget(graph_container)
+        gsplitter.addWidget(graph_container)
 
         self._event_list = QListWidget()
         self._event_list.setFont(QFont("monospace", 9))
-        self._event_list.setMinimumWidth(200)
+        self._event_list.setMinimumWidth(180)
         self._event_logger.attach(self._event_list)
-        splitter.addWidget(self._event_list)
-        main_layout.addWidget(splitter, stretch=1)
+        gsplitter.addWidget(self._event_list)
+        detail_layout.addWidget(gsplitter, stretch=1)
 
-        bottom_bar = QFrame()
-        bottom_layout = QHBoxLayout(bottom_bar)
-        bottom_layout.setContentsMargins(4, 2, 4, 2)
-        self._stress_checkbox = QCheckBox("Stress Test")
-        self._stress_checkbox.toggled.connect(self._on_stress_toggled)
-        bottom_layout.addWidget(self._stress_checkbox)
-        bottom_layout.addStretch()
-        self._qual_button = QPushButton("Qualification Report")
-        self._qual_button.clicked.connect(self._show_qualification_report)
-        bottom_layout.addWidget(self._qual_button)
-        main_layout.addWidget(bottom_bar)
+        hsplitter.addWidget(detail_panel)
+        hsplitter.setStretchFactor(0, 2)
+        hsplitter.setStretchFactor(1, 3)
+        root.addWidget(hsplitter, stretch=1)
+
+        # ── Camera Control Panel ─────────────────────────────
+
+        self._control_panel = CameraControlPanel()
+        self._control_panel.nuc_clicked.connect(self._on_nuc_clicked)
+        self._control_panel.focus_near_clicked.connect(self._on_focus_near)
+        self._control_panel.focus_far_clicked.connect(self._on_focus_far)
+        root.addWidget(self._control_panel)
+
+        # ── Status Bar ───────────────────────────────────────
+
+        self._status_bar = QStatusBar()
+        self.setStatusBar(self._status_bar)
+        self._status_label = QLabel("Ready")
+        self._status_bar.addWidget(self._status_label)
+        self._cam_count_label = QLabel("Cameras: 0")
+        self._status_bar.addPermanentWidget(self._cam_count_label)
+        self._sel_label = QLabel("")
+        self._status_bar.addPermanentWidget(self._sel_label)
 
     # ==========================================================
-    # Camera Setup
+    # Camera Initialization (multi-camera)
     # ==========================================================
 
-    def _init_camera(self) -> None:
-        self._camera_error: str | None = None
+    def _init_cameras(self) -> None:
         try:
-            print("[INFO] Initializing calibration...")
-            self._calibration.initialize()
-            self._event_logger.log("Calibration loaded")
-
-            print("[INFO] Discovering cameras...")
-            cameras = _discover_cameras()
-            if not cameras:
-                self._camera_error = "No GigE Vision cameras found."
-                print(f"[ERROR] {self._camera_error}")
-                return
-
-            cam_info = cameras[0]
-            print(f"[INFO] Using camera: {cam_info.serial} @ {cam_info.ip}")
-
-            self._camera = TV46LCamera(cam_info, settings)
-            self._camera.connect()
-            self._camera.start()
-            self._acquisition_start_time = time.time()
-
-            if not self._camera.wait_for_first_frame(10):
-                self._camera_error = "No frames received from camera."
-                print(f"[ERROR] {self._camera_error}")
-                self._camera.disconnect()
-                self._camera = None
-                return
-
-            self._event_logger.log("Camera connected")
-            print("[INFO] Camera ready.")
+            cal = CalibrationManager()
+            cal.initialize()
+            print("[INFO] Calibration loaded.")
         except Exception as exc:
-            self._camera_error = str(exc)
-            print(f"[ERROR] Camera init failed: {exc}")
-            self._camera = None
+            print(f"[WARN] Calibration init failed: {exc}")
+            cal = CalibrationManager()
+            cal._initialized = False
+
+        try:
+            print("[INFO] Discovering cameras...")
+            infos = _discover_cameras()
+        except Exception as exc:
+            print(f"[ERROR] Discovery failed: {exc}")
+            infos = []
+
+        if not infos:
+            print("[WARN] No GigE Vision cameras found.")
+            self._status_label.setText("No cameras found")
+            return
+
+        for info in infos:
+            self._add_camera(info, cal)
+
+        self._rebuild_grid()
+        self._cam_count_label.setText(
+            f"Cameras: {len(self._camera_data)}"
+        )
+        print(
+            f"[INFO] {len(self._camera_data)} camera(s) initialized."
+        )
+
+    def _add_camera(
+        self,
+        info: CameraInfo,
+        cal: CalibrationManager,
+    ) -> None:
+        serial = info.serial
+        if serial in self._camera_data:
+            return
+
+        try:
+            camera = TV46LCamera(info, settings)
+            camera.connect()
+            camera.start()
+
+            if not camera.wait_for_first_frame(10):
+                print(f"[WARN] {serial}: No frames received")
+                camera.disconnect()
+                return
+
+            data = PerCameraData(
+                camera=camera,
+                calibration=cal,
+                timing=TimingMonitor(),
+                frame_history=FrameHistory(),
+                graph_manager=GraphManager(),
+                session=QualificationSession(),
+                monitor=QualificationMonitor(),
+            )
+            self._camera_data[serial] = data
+            self._cam_order.append(serial)
+
+            tile = CameraTileWidget(serial, f"SN:{serial}")
+            tile.selected.connect(self._on_tile_selected)
+            self._tiles[serial] = tile
+
+            self._event_logger.log(f"{serial}: Camera connected")
+            print(f"[INFO] {serial}: Camera ready.")
+
+        except Exception as exc:
+            msg = f"{serial}: Init failed: {exc}"
+            print(f"[ERROR] {msg}")
+            self._event_logger.log(msg)
+            tile = CameraTileWidget(serial, f"SN:{serial}")
+            tile.show_error(msg)
+            tile.selected.connect(self._on_tile_selected)
+            self._tiles[serial] = tile
+
+    # ==========================================================
+    # Grid Layout
+    # ==========================================================
+
+    def _rebuild_grid(self) -> None:
+        while self._tile_grid.count():
+            item = self._tile_grid.takeAt(0)
+            if item.widget():
+                item.widget().setParent(None)
+
+        count = len(self._tiles)
+        if count == 0:
+            self._empty_label = QLabel(
+                "No cameras detected."
+            )
+            self._empty_label.setAlignment(
+                Qt.AlignmentFlag.AlignCenter
+            )
+            self._empty_label.setStyleSheet(
+                "color: #999999; font-size: 14px;"
+            )
+            self._tile_grid.addWidget(self._empty_label, 0, 0)
+            return
+
+        cols = 1 if count == 1 else (2 if count <= 4 else (3 if count <= 6 else 4))
+        for i, serial in enumerate(self._cam_order):
+            tile = self._tiles.get(serial)
+            if tile is None:
+                continue
+            self._tile_grid.addWidget(tile, i // cols, i % cols)
+
+    # ==========================================================
+    # Camera Selection
+    # ==========================================================
+
+    def _on_tile_selected(self, serial: str) -> None:
+        self._select_camera(serial)
+
+    def _select_camera(self, serial: str | None) -> None:
+        if serial == self._selected_serial:
+            return
+
+        for s, tile in self._tiles.items():
+            tile.set_selected(s == serial)
+
+        self._selected_serial = serial
+
+        if serial is not None and serial in self._camera_data:
+            data = self._camera_data[serial]
+            try:
+                fd = data.camera.get_focus_distance()
+            except Exception:
+                fd = None
+            self._control_panel.show_selection(serial, fd)
+            self._sel_label.setText(f"Selected: {serial}")
+            self._status_label.setText(f"Selected: {serial}")
+        else:
+            self._control_panel.clear_selection()
+            self._sel_label.setText("")
+            self._status_label.setText("No camera selected")
 
     # ==========================================================
     # Timers
@@ -1619,7 +2222,7 @@ class MainWindow(QMainWindow):
 
     def _init_timers(self) -> None:
         self._frame_timer = QTimer(self)
-        self._frame_timer.timeout.connect(self._poll_frame)
+        self._frame_timer.timeout.connect(self._poll_all_frames)
         self._frame_timer.start(_FRAME_TIMER_MS)
 
         self._diag_timer = QTimer(self)
@@ -1631,114 +2234,103 @@ class MainWindow(QMainWindow):
         self._graph_timer.start(_GRAPH_TIMER_MS)
 
     # ==========================================================
-    # Frame Poll (30 ms)
+    # Frame Poll (30 ms) — all cameras
     # ==========================================================
 
-    def _poll_frame(self) -> None:
-        if self._camera is None:
+    def _poll_all_frames(self) -> None:
+        for serial, data in list(self._camera_data.items()):
+            self._poll_one_camera(serial, data)
+
+    def _poll_one_camera(
+        self,
+        serial: str,
+        data: PerCameraData,
+    ) -> None:
+        camera = data.camera
+        tile = self._tiles.get(serial)
+        if tile is None:
             return
 
-        frame = self._camera.get_latest_frame_reference()
+        frame = camera.get_latest_frame_reference()
         if frame is None:
             return
 
-        if frame.sequence == self._last_sequence:
+        if frame.sequence == data.last_sequence:
             return
 
         if (
-            self._last_sequence >= 0
-            and frame.sequence != self._last_sequence + 1
+            data.last_sequence >= 0
+            and frame.sequence != data.last_sequence + 1
         ):
-            gap = frame.sequence - self._last_sequence - 1
-            self._skipped_frames += gap
-            self._event_logger.log(f"Skipped frame: seq {frame.sequence}")
+            gap = frame.sequence - data.last_sequence - 1
+            data.skipped_frames += gap
+            self._event_logger.log(
+                f"{serial}: Skipped frame seq {frame.sequence}"
+            )
         else:
             gap = 0
 
-        self._last_sequence = frame.sequence
-        self._gui_frame_count += 1
-        self._session.record_frame(gap)
-
+        data.last_sequence = frame.sequence
+        data.gui_frame_count += 1
+        data.session.record_frame(gap)
         gui_poll_time = time.perf_counter()
 
-        display_start = time.perf_counter()
-        display_image = self._calibration.raw_to_display(frame.image)
-        display_finish = time.perf_counter()
+        try:
+            display_image = data.calibration.raw_to_display(frame.image)
+            color_image = data.calibration.apply_colormap(display_image)
+        except Exception:
+            return
 
-        colormap_start = time.perf_counter()
-        color_image = self._calibration.apply_colormap(display_image)
-        colormap_finish = time.perf_counter()
-
-        qimage_start = time.perf_counter()
         rgb_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb_image.shape
-        bytes_per_line = ch * w
         qimage = QImage(
             rgb_image.data.tobytes(),
-            w,
-            h,
-            bytes_per_line,
+            w, h, ch * w,
             QImage.Format.Format_RGB888,
         )
-        qimage_finish = time.perf_counter()
-
-        pixmap_start = time.perf_counter()
         pixmap = QPixmap.fromImage(qimage)
-        pixmap_finish = time.perf_counter()
 
         gst = frame.grab_start_time
         gct = frame.grab_complete_time
         nct = frame.numpy_complete_time
         pt = frame.publish_time
 
-        update_request = time.perf_counter()
-        overlay_latency = (update_request - gst) * 1000
-
-        self._thermal_widget.set_image(
+        overlay_latency = (gui_poll_time - gst) * 1000
+        tile.set_image(
             pixmap,
             frame.frame_number,
-            gst,
-            update_request,
+            camera.get_fps(),
             overlay_latency,
+            camera.timeout_count,
+            "PASS" if camera.stream_healthy() else "WARNING",
         )
-        self._update_requests += 1
-        self._thermal_widget.update()
 
-        now_time = time.time()
-        if now_time - self._gui_fps_timer >= 1.0:
-            self._gui_fps = self._gui_frame_count
-            self._session.record_fps(float(self._gui_fps))
-            self._gui_frame_count = 0
-            self._gui_fps_timer = now_time
+        now = time.time()
+        if now - data.gui_fps_timer >= 1.0:
+            data.gui_fps = data.gui_frame_count
+            data.session.record_fps(float(data.gui_fps))
+            data.gui_frame_count = 0
+            data.gui_fps_timer = now
 
         acquire_ms = (gct - gst) * 1000
         numpy_ms = (nct - gct) * 1000
         publish_ms = (pt - nct) * 1000
         gui_delay_ms = (gui_poll_time - pt) * 1000
-        display_ms = (display_finish - display_start) * 1000
-        colormap_ms = (colormap_finish - colormap_start) * 1000
-        qimage_ms = (qimage_finish - qimage_start) * 1000
-        pixmap_ms = (pixmap_finish - pixmap_start) * 1000
 
-        latency_dict = {
+        ld = {
             "acquire": acquire_ms,
             "numpy": numpy_ms,
             "publish": publish_ms,
             "gui_delay": gui_delay_ms,
-            "display": display_ms,
-            "colormap": colormap_ms,
-            "qimage": qimage_ms,
-            "pixmap": pixmap_ms,
         }
-        self._timing.update_all(latency_dict)
-        for stage, val in latency_dict.items():
-            self._session.record_per_stage(stage, val)
-
-        self._graph_manager.add_point("acquire", acquire_ms)
-        self._graph_manager.add_point("display_colormap", display_ms + colormap_ms)
-        self._graph_manager.add_point("qimage_pixmap", qimage_ms + pixmap_ms)
-        self._graph_manager.add_point("gui_delay", gui_delay_ms)
-        self._graph_manager.add_point("fps", float(self._camera.get_fps() if self._camera else 0))
+        data.timing.update_all(ld)
+        for stage, val in ld.items():
+            data.session.record_per_stage(stage, val)
+        data.graph_manager.add_point("acquire", acquire_ms)
+        data.graph_manager.add_point("gui_delay", gui_delay_ms)
+        data.graph_manager.add_point(
+            "fps", float(camera.get_fps())
+        )
 
         record = FrameRecord(
             sequence=frame.sequence,
@@ -1748,208 +2340,224 @@ class MainWindow(QMainWindow):
             numpy_complete=nct,
             publish_time=pt,
             gui_poll_time=gui_poll_time,
-            display_start=display_start,
-            display_finish=display_finish,
-            colormap_start=colormap_start,
-            colormap_finish=colormap_finish,
-            qimage_start=qimage_start,
-            qimage_finish=qimage_finish,
-            pixmap_start=pixmap_start,
-            pixmap_finish=pixmap_finish,
-            update_request=update_request,
         )
-        self._frame_history.append(record)
+        data.frame_history.append(record)
 
         if frame.frame_number % 5 == 0:
-            timeout_count = self._camera.timeout_count if self._camera else 0
-            if timeout_count > self._last_timeout_count:
-                self._monitor.track_timeout(timeout_count, self._event_logger)
-                for _ in range(timeout_count - self._last_timeout_count):
-                    self._session.record_timeout()
-                self._last_timeout_count = timeout_count
-
-        if self._stress_test_enabled:
-            for _ in range(3):
-                self._thermal_widget.update()
-                self._stress_paint_count += 1
-
-        self._update_console()
+            tc = camera.timeout_count
+            if tc > data.last_timeout_count:
+                for _ in range(tc - data.last_timeout_count):
+                    data.session.record_timeout()
+                data.last_timeout_count = tc
 
     # ==========================================================
-    # Diagnostics Update (1000 ms)
+    # Diagnostics Update (1000 ms) — selected camera
     # ==========================================================
 
     def _update_diagnostics(self) -> None:
-        tw = self._thermal_widget
-        paint_events = tw.drain_paint_events()
-        for paint_ms, total_ms, delay_ms in paint_events:
-            self._timing.paint.update(paint_ms)
-            self._timing.total.update(total_ms)
-            self._timing.update_delay.update(delay_ms)
-            self._graph_manager.add_point("paint", paint_ms)
-            self._session.record_paint(paint_ms)
-            self._session.record_total_latency(total_ms)
-            self._paint_event_count += 1
+        if (
+            self._selected_serial is None
+            or self._selected_serial not in self._camera_data
+        ):
+            return
 
-            latest = self._frame_history.latest
-            if latest is not None:
-                latest.paint_start = tw.paint_start_time
-                latest.paint_finish = tw.paint_finish_time
+        data = self._camera_data[self._selected_serial]
+        camera = data.camera
 
         cpu = self._process.cpu_percent()
         memory = self._process.memory_info().rss / 1024 / 1024
-        self._session.record_cpu(cpu)
-        self._session.record_memory(memory)
-        self._graph_manager.add_point("cpu", cpu)
-        self._graph_manager.add_point("update_rate", float(self._gui_fps))
-
-        window_size = (self.width(), self.height())
-        img_w, img_h = 0, 0
-        if tw._pixmap is not None:
-            img_w = tw._pixmap.width()
-            img_h = tw._pixmap.height()
+        data.session.record_cpu(cpu)
+        data.session.record_memory(memory)
+        data.graph_manager.add_point("cpu", cpu)
+        data.graph_manager.add_point("update_rate", float(data.gui_fps))
 
         self._acquisition_panel.refresh(
-            self._camera,
-            self._camera.get_stream_statistics() if self._camera else None,
+            camera,
+            camera.get_stream_statistics() if camera.connected else None,
         )
         self._processing_panel.refresh(
-            self._timing,
-            self._calibration.is_initialized,
+            data.timing,
+            data.calibration.is_initialized,
             0,
         )
         self._system_panel.refresh(
-            cpu,
-            memory,
-            self._gui_fps,
-            self._update_requests,
-            self._paint_event_count,
-            window_size,
-            (img_w, img_h),
+            cpu, memory, data.gui_fps,
+            data.update_requests, data.paint_event_count,
+            (self.width(), self.height()),
+            (0, 0),
         )
 
-        statuses = self._evaluate_health()
+        statuses = {
+            "camera": HealthEvaluator.evaluate_camera(camera),
+            "acquisition": HealthEvaluator.evaluate_acquisition(camera),
+            "calibration": HealthEvaluator.evaluate_calibration(
+                data.calibration.is_initialized
+            ),
+            "rendering": HealthEvaluator.evaluate_rendering(
+                data.timing.paint.latest, data.timing.paint.count
+            ),
+            "memory": HealthEvaluator.evaluate_memory(memory),
+            "timing": HealthEvaluator.evaluate_timing(
+                data.timing.total.latest, data.timing.total.count
+            ),
+        }
         self._health_panel.refresh_panel(statuses)
+        self._timing_table.refresh_table(data.timing.get_stats())
 
-        overall = HealthEvaluator.overall(statuses)
-        self._update_overlay(
-            self._last_sequence,
-            self._gui_fps,
-            self._timing.total.latest,
-            overall,
+        data.monitor.poll(
+            camera,
+            data.calibration.is_initialized,
+            self._event_logger,
         )
-        self._update_status_indicator(overall)
-
-        self._timing_table.refresh_table(self._timing.get_stats())
-
-        self._check_camera_state()
-
-    # ==========================================================
-    # Health Evaluation
-    # ==========================================================
-
-    def _evaluate_health(self) -> dict[str, str]:
-        statuses: dict[str, str] = {}
-
-        statuses["camera"] = HealthEvaluator.evaluate_camera(self._camera)
-        statuses["acquisition"] = HealthEvaluator.evaluate_acquisition(self._camera)
-        statuses["calibration"] = HealthEvaluator.evaluate_calibration(self._calibration.is_initialized)
-        statuses["rendering"] = HealthEvaluator.evaluate_rendering(
-            self._timing.paint.latest, self._timing.paint.count
-        )
-        memory_mb = self._process.memory_info().rss / 1024 / 1024
-        statuses["memory"] = HealthEvaluator.evaluate_memory(memory_mb)
-        statuses["timing"] = HealthEvaluator.evaluate_timing(
-            self._timing.total.latest, self._timing.total.count
+        data.session.record_camera_state(
+            camera.connected, camera.running
         )
 
-        return statuses
+        # Update selected tile status
+        tile = self._tiles.get(self._selected_serial)
+        if tile is not None:
+            overall = HealthEvaluator.overall(statuses)
+            tile._stat_labels["status"].setText(f"S:{overall[:4]}")
 
-    def _check_camera_state(self) -> None:
-        self._monitor.poll(self._camera, self._calibration.is_initialized, self._event_logger)
-        if self._camera is None:
-            self._session.record_camera_state(False, False)
-        else:
-            self._session.record_camera_state(self._camera.connected, self._camera.running)
+        # Update selected cam focus
+        try:
+            fd = camera.get_focus_distance()
+            self._control_panel.update_focus_distance(fd)
+        except Exception:
+            pass
 
     # ==========================================================
-    # Graph Update (200 ms)
+    # Graph Update (200 ms) — selected camera
     # ==========================================================
 
     def _update_graphs(self) -> None:
-        all_series = self._graph_manager.get_all_series()
+        if (
+            self._selected_serial is None
+            or self._selected_serial not in self._camera_data
+        ):
+            return
+
+        data = self._camera_data[self._selected_serial]
+        all_series = data.graph_manager.get_all_series()
+
         for gw in self._graph_widgets:
             title = gw._title
-            if title == "Total Latency":
-                data = all_series.get("total", [])
-                gw.set_series("total", data, GraphWidget.COLORS.get("total"))
-                if data:
-                    rng = max(data) - min(data) if data else 100
-                    gw.set_range(max(0, min(data) - rng * 0.1), max(data) + rng * 0.1 + 1)
-            elif title == "Acquire Time":
-                data = all_series.get("acquire", [])
-                gw.set_series("acquire", data, GraphWidget.COLORS.get("acquire"))
-                if data:
-                    gw.set_range(0, max(data) * 1.2 + 1)
-            elif title == "Display+Colormap":
-                data = all_series.get("display_colormap", [])
-                gw.set_series("display_colormap", data, GraphWidget.COLORS.get("display"))
-                if data:
-                    gw.set_range(0, max(data) * 1.2 + 1)
-            elif title == "QImage+Pixmap":
-                data = all_series.get("qimage_pixmap", [])
-                gw.set_series("qimage_pixmap", data, GraphWidget.COLORS.get("qimage"))
-                if data:
-                    gw.set_range(0, max(data) * 1.2 + 1)
-            elif title == "GUI Delay":
-                data = all_series.get("gui_delay", [])
-                gw.set_series("gui_delay", data, GraphWidget.COLORS.get("gui_delay"))
-                if data:
-                    gw.set_range(0, max(data) * 1.2 + 1)
-            elif title == "Paint Time":
-                data = all_series.get("paint", [])
-                gw.set_series("paint", data, GraphWidget.COLORS.get("paint"))
-                if data:
-                    gw.set_range(0, max(data) * 1.2 + 1)
-            elif title == "FPS":
-                data = all_series.get("fps", [])
-                gw.set_series("fps", data, GraphWidget.COLORS.get("fps"))
-                if data:
-                    gw.set_range(0, max(data) * 1.2 + 1)
-            elif title == "CPU %":
-                data = all_series.get("cpu", [])
-                gw.set_series("cpu", data, GraphWidget.COLORS.get("total"))
-                if data:
-                    gw.set_range(0, max(data) * 1.2 + 1)
-            elif title == "Update Rate":
-                data = all_series.get("update_rate", [])
-                gw.set_series("update_rate", data, GraphWidget.COLORS.get("gui_delay"))
-                if data:
-                    gw.set_range(0, max(data) * 1.2 + 1)
+            key_map = {
+                "Total Latency": "total",
+                "Acquire Time": "acquire",
+                "Display+Colormap": "display_colormap",
+                "QImage+Pixmap": "qimage_pixmap",
+                "GUI Delay": "gui_delay",
+                "Paint Time": "paint",
+                "FPS": "fps",
+                "CPU %": "cpu",
+                "Update Rate": "update_rate",
+            }
+            key = key_map.get(title)
+            if key is None:
+                continue
+            sdata = all_series.get(key, [])
+            gw.set_series(key, sdata, GraphWidget.COLORS.get(key))
+            if sdata:
+                gw.set_range(0, max(sdata) * 1.2 + 1)
 
     # ==========================================================
-    # Overlay Update
+    # NUC Control
     # ==========================================================
 
-    def _update_overlay(
-        self,
-        frame_num: int,
-        fps: int,
-        latency: float,
-        status: str,
-    ) -> None:
-        self._overlay_labels["frame"].setText(f"Frame: {frame_num if frame_num >= 0 else '--'}")
-        self._overlay_labels["fps"].setText(f"FPS: {fps}")
-        self._overlay_labels["latency"].setText(f"Lat: {latency:.1f} ms")
-        self._overlay_labels["status"].setText(f"Status: {status}")
+    def _on_nuc_clicked(self) -> None:
+        if self._nuc_busy:
+            return
+        if (
+            self._selected_serial is None
+            or self._selected_serial not in self._camera_data
+        ):
+            return
 
-    def _update_status_indicator(self, status: str) -> None:
-        if status == "PASS":
-            self._status_indicator.setStyleSheet("color: #2ecc71;")
-        elif status == "WARNING":
-            self._status_indicator.setStyleSheet("color: #f1c40f;")
-        else:
-            self._status_indicator.setStyleSheet("color: #e74c3c;")
+        data = self._camera_data[self._selected_serial]
+        self._nuc_busy = True
+        self._control_panel.set_nuc_busy(True)
+        self._status_label.setText(
+            f"NUC in progress on {self._selected_serial}..."
+        )
+        QApplication.processEvents()
+
+        try:
+            data.camera.manual_nuc()
+            self._event_logger.log(
+                f"{self._selected_serial}: NUC executed"
+            )
+            self._status_label.setText(
+                f"NUC completed on {self._selected_serial}."
+            )
+        except Exception as exc:
+            self._event_logger.log(
+                f"{self._selected_serial}: NUC failed: {exc}"
+            )
+            self._status_label.setText(f"NUC failed: {exc}")
+        finally:
+            self._nuc_busy = False
+            self._control_panel.set_nuc_busy(False)
+
+    # ==========================================================
+    # Focus Control
+    # ==========================================================
+
+    FOCUS_STEP_MM = 250
+
+    def _on_focus_near(self) -> None:
+        self._execute_focus(-self.FOCUS_STEP_MM)
+
+    def _on_focus_far(self) -> None:
+        self._execute_focus(self.FOCUS_STEP_MM)
+
+    def _execute_focus(self, step_mm: int) -> None:
+        if self._focus_busy:
+            return
+        if (
+            self._selected_serial is None
+            or self._selected_serial not in self._camera_data
+        ):
+            return
+
+        data = self._camera_data[self._selected_serial]
+        camera = data.camera
+
+        self._focus_busy = True
+        self._control_panel.set_focus_busy(True)
+        dir_str = "near" if step_mm < 0 else "far"
+        self._status_label.setText(
+            f"Focus {dir_str} on {self._selected_serial}..."
+        )
+        QApplication.processEvents()
+
+        try:
+            current = camera.get_focus_distance()
+            limits = camera.get_focus_limits()
+            target = max(limits[0], min(current + step_mm, limits[1]))
+
+            camera.set_focus_distance(target)
+            camera.wait_for_focus(target)
+
+            actual = camera.get_focus_distance()
+            self._control_panel.update_focus_distance(actual)
+            self._event_logger.log(
+                f"{self._selected_serial}: Focus {dir_str} "
+                f"{current:.0f}->{actual:.0f}mm"
+            )
+            self._status_label.setText(
+                f"Focus {dir_str}: {actual:.0f} mm"
+            )
+        except Exception as exc:
+            self._event_logger.log(
+                f"{self._selected_serial}: Focus {dir_str} failed: {exc}"
+            )
+            self._status_label.setText(
+                f"Focus {dir_str} failed: {exc}"
+            )
+        finally:
+            self._focus_busy = False
+            self._control_panel.set_focus_busy(False)
 
     # ==========================================================
     # Stress Test
@@ -1966,10 +2574,26 @@ class MainWindow(QMainWindow):
     # ==========================================================
 
     def _show_qualification_report(self) -> None:
-        self._session.stop()
-        report = self._session.generate_report(self._camera, self._calibration.is_initialized)
+        if self._selected_serial is None:
+            QMessageBox.information(
+                self, "No Camera",
+                "Select a camera first to view its qualification report."
+            )
+            return
+
+        data = self._camera_data.get(self._selected_serial)
+        if data is None:
+            return
+
+        data.session.stop()
+        report = data.session.generate_report(
+            data.camera, data.calibration.is_initialized
+        )
+
         dialog = QDialog(self)
-        dialog.setWindowTitle("Qualification Report")
+        dialog.setWindowTitle(
+            f"Qualification Report — {self._selected_serial}"
+        )
         dialog.setMinimumSize(700, 500)
         layout = QVBoxLayout(dialog)
         label = QLabel(report)
@@ -1985,27 +2609,6 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     # ==========================================================
-    # Console Output
-    # ==========================================================
-
-    def _update_console(self) -> None:
-        now = time.time()
-        if now - self._last_console_time < _CONSOLE_INTERVAL:
-            return
-        self._last_console_time = now
-        frame = self._last_sequence
-        seq = self._last_sequence
-        fps = self._camera.get_fps() if self._camera else 0
-        timeouts = self._camera.timeout_count if self._camera else 0
-        total_lat = self._timing.total.latest
-        statuses = self._evaluate_health()
-        overall = HealthEvaluator.overall(statuses)
-        print(
-            f"[CAMQUAL] F:{frame} S:{seq} FPS:{fps} "
-            f"T:{timeouts} Lat:{total_lat:.1f}ms Health:{overall}"
-        )
-
-    # ==========================================================
     # Shutdown
     # ==========================================================
 
@@ -2013,10 +2616,10 @@ class MainWindow(QMainWindow):
         self._frame_timer.stop()
         self._diag_timer.stop()
         self._graph_timer.stop()
-        if self._camera is not None:
+        for serial, data in self._camera_data.items():
             try:
-                self._camera.stop()
-                self._camera.disconnect()
+                data.camera.stop()
+                data.camera.disconnect()
             except Exception:
                 pass
         super().closeEvent(event)

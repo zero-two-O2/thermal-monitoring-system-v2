@@ -20,7 +20,10 @@ class CameraStatus(Enum):
     DISCOVERED = "Discovered"
     CONNECTING = "Connecting"
     CONNECTED = "Connected"
+    DISCONNECTED = "Disconnected"
     ACQUIRING = "Acquiring"
+    STREAMING = "Streaming"
+    RUNNING = "Running"
     ERROR = "Error"
 
 
