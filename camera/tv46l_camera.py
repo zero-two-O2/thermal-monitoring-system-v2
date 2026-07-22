@@ -381,7 +381,8 @@ class TV46LCamera:
                     self._frame_counter += 1
                     frame.frame_number = self._frame_counter
                     frame.sequence = self._frame_counter
-                    
+                    self._last_frame_time = time.time()
+
                     self._latest_frame = frame
                 # FPS
                 self._update_fps()
