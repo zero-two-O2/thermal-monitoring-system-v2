@@ -42,6 +42,11 @@ class RawFrame:
     )
     frame_number: int = 0
     acquisition_timestamp: float = 0.0
+    grab_start_time: float = 0.0
+    grab_complete_time: float = 0.0
+    numpy_complete_time: float = 0.0
+    publish_time: float = 0.0
+    sequence: int = -1
 
 # ==========================================================
 # Processed Frame

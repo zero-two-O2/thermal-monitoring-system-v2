@@ -73,6 +73,24 @@ class TV46LCamera:
         self._fps_frame_counter = 0
         # Manual NUC
         self._nuc_requested = False
+        # Diagnostics (timeout hypothesis verification)
+        self._diag_calls = 0
+        self._diag_success = 0
+        self._diag_timeout = 0
+        self._diag_other_errors = 0
+        self._diag_grab_time = 0.0
+        self._diag_grab_max = 0.0
+        self._diag_conv_time = 0.0
+        self._diag_conv_max = 0.0
+        self._diag_total_time = 0.0
+        self._diag_last_report = time.time()
+        self._diag_int_calls = 0
+        self._diag_int_success = 0
+        self._diag_int_timeout = 0
+        self._diag_int_other = 0
+        self._diag_int_grab = 0.0
+        self._diag_int_conv = 0.0
+        self._diag_int_total = 0.0
 
     # ==========================================================
     # Properties
@@ -197,6 +215,29 @@ class TV46LCamera:
             16,
         )
         #
+        # GigE Vision transport tuning (legacy from proven configuration)
+        
+        try:
+            ha.set_framegrabber_param(
+                self._acq,
+                "[Stream]DeviceStreamChannelNegotiatePacketSize",
+                1,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"{self.serial}: Unable to negotiate packet size: {exc}"
+            )
+        try:
+            ha.set_framegrabber_param(
+                self._acq,
+                "[Stream]GevStreamReceiveSocketSize",
+                1048576,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"{self.serial}: Unable to set socket buffer size: {exc}"
+            )
+        #
         # Increase internal buffering
         
         try:
@@ -287,6 +328,46 @@ class TV46LCamera:
             f"{self.serial}: Acquisition loop started."
         )
         while self._running:
+            now = time.time()
+            if now - self._diag_last_report >= 1.0:
+                ic = self._diag_int_calls
+                isc = self._diag_int_success
+                ito = self._diag_int_timeout
+                ioe = self._diag_int_other
+                ig = self._diag_int_grab
+                icv = self._diag_int_conv
+                itot = self._diag_int_total
+                rate = (ito / ic * 100) if ic else 0.0
+                print(
+                    f"\n[DIAG] {self.serial}  "
+                    f"Frames:{isc}  Calls:{ic}  "
+                    f"Timeouts:{ito}  Other:{ioe}  "
+                    f"Rate:{rate:.0f}%"
+                )
+                if ic:
+                    print(
+                        f"[DIAG]  "
+                        f"Grab_avg:{ig/ic*1000:.1f}ms  "
+                        f"Grab_max:{self._diag_grab_max*1000:.1f}ms  "
+                        f"Conv_avg:{icv/ic*1000:.1f}ms  "
+                        f"Conv_max:{self._diag_conv_max*1000:.1f}ms  "
+                        f"Total_avg:{itot/ic*1000:.1f}ms"
+                    )
+                else:
+                    print(f"[DIAG]  (no frames yet)")
+                print(
+                    f"[DIAG]  "
+                    f"Loop_outer_timeout_cnt:{self._timeout_counter}  "
+                    f"FPS:{self._fps}"
+                )
+                self._diag_int_calls = 0
+                self._diag_int_success = 0
+                self._diag_int_timeout = 0
+                self._diag_int_other = 0
+                self._diag_int_grab = 0.0
+                self._diag_int_conv = 0.0
+                self._diag_int_total = 0.0
+                self._diag_last_report = now
             try:
                 # Manual NUC
                 if self._nuc_requested:
@@ -294,10 +375,14 @@ class TV46LCamera:
                 # Grab newest frame
                 frame = self._grab_raw_frame()
                 # Save newest frame
+                frame.publish_time = time.perf_counter()
+                
                 with self._lock:
-                    self._latest_frame = frame
-                    self._last_frame_time = time.time()
                     self._frame_counter += 1
+                    frame.frame_number = self._frame_counter
+                    frame.sequence = self._frame_counter
+                    
+                    self._latest_frame = frame
                 # FPS
                 self._update_fps()
             except Exception:
@@ -316,17 +401,41 @@ class TV46LCamera:
     # ==========================================================
 
     def _grab_raw_frame(self) -> RawFrame:
+        self._diag_calls += 1
+        self._diag_int_calls += 1
+        _t0 = time.perf_counter()
         try:
             image = ha.grab_image_async(
                 self._acq,
-                100,
+                200,
             )
-        except Exception:
+            _t1 = time.perf_counter()
+            self._diag_success += 1
+            self._diag_int_success += 1
+            _gd = _t1 - _t0
+            self._diag_grab_time += _gd
+            self._diag_int_grab += _gd
+            if _gd > self._diag_grab_max:
+                self._diag_grab_max = _gd
+        except Exception as _exc:
+            _t1 = time.perf_counter()
+            _gd = _t1 - _t0
+            self._diag_grab_time += _gd
+            self._diag_int_grab += _gd
+            if _gd > self._diag_grab_max:
+                self._diag_grab_max = _gd
+            if isinstance(_exc, ha.HOperatorError):
+                self._diag_timeout += 1
+                self._diag_int_timeout += 1
+            else:
+                self._diag_other_errors += 1
+                self._diag_int_other += 1
             logger.exception(
                 f"{self.serial}: grab_image_async FAILED"
             )
             raise
 
+        _t2 = time.perf_counter()
         try:
             frame = ha.himage_as_numpy_array(
                 image
@@ -336,6 +445,16 @@ class TV46LCamera:
                 f"{self.serial}: himage_as_numpy_array FAILED"
             )
             raise
+        _t3 = time.perf_counter()
+        _cd = _t3 - _t2
+        self._diag_conv_time += _cd
+        self._diag_int_conv += _cd
+        if _cd > self._diag_conv_max:
+            self._diag_conv_max = _cd
+
+        _td = _t3 - _t0
+        self._diag_total_time += _td
+        self._diag_int_total += _td
 
         return RawFrame(
             image=frame.copy(),
@@ -343,6 +462,9 @@ class TV46LCamera:
             timestamp=datetime.now(),
             frame_number=self._frame_counter,
             acquisition_timestamp=time.perf_counter(),
+            grab_start_time=_t0,
+            grab_complete_time=_t1,
+            numpy_complete_time=_t3,
         )
 
 
@@ -393,6 +515,18 @@ class TV46LCamera:
         return self._copy_frame(latest)
 
     # ==========================================================
+    # Latest Frame Reference (diagnostic, no copy)
+    # ==========================================================
+
+    def get_latest_frame_reference(self) -> RawFrame | None:
+        """
+        Returns the latest RawFrame without copying.
+        Diagnostic use only.
+        """
+        with self._lock:
+            return self._latest_frame
+
+    # ==========================================================
     # Internal Copy
     # ==========================================================
 
@@ -406,6 +540,11 @@ class TV46LCamera:
             timestamp=frame.timestamp,
             frame_number=frame.frame_number,
             acquisition_timestamp=frame.acquisition_timestamp,
+            grab_start_time=frame.grab_start_time,
+            grab_complete_time=frame.grab_complete_time,
+            numpy_complete_time=frame.numpy_complete_time,
+            publish_time=frame.publish_time,
+            sequence=frame.sequence,
         )
 
     # ==========================================================
@@ -552,6 +691,26 @@ class TV46LCamera:
         statistics["fps"] = self._fps
         statistics["alive"] = self.is_alive()
         return statistics
+
+    # ==========================================================
+    # Acquisition Diagnostics
+    # ==========================================================
+
+    def acquisition_diagnostics(self) -> dict:
+        grab_avg = self._diag_grab_time / self._diag_calls * 1000 if self._diag_calls else 0.0
+        convert_avg = self._diag_conv_time / self._diag_calls * 1000 if self._diag_calls else 0.0
+        total_avg = self._diag_total_time / self._diag_calls * 1000 if self._diag_calls else 0.0
+        return {
+            "frames": self._frame_counter,
+            "fps": self._fps,
+            "timeouts": self._timeout_counter,
+            "alive": self.is_alive(),
+            "grab_avg_ms": grab_avg,
+            "grab_max_ms": self._diag_grab_max * 1000,
+            "convert_avg_ms": convert_avg,
+            "convert_max_ms": self._diag_conv_max * 1000,
+            "total_avg_ms": total_avg,
+        }
 
     # ==========================================================
     # Camera Information

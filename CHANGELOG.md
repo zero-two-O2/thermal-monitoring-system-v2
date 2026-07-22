@@ -1,3 +1,66 @@
+## 2026-07-22 12:05
+### What changed
+- Created `tests/gui_latency_test.py` — a standalone Qt diagnostic app that measures end-to-end latency from camera acquisition to Qt painting.
+- Twelve pipeline stages are measured per frame: Acquire, NumPy, Publish, GUI Delay, Display Conv, Colormap, QImage, Pixmap, Update Delay, Paint Time, and Total.
+- Running min/max/avg statistics for every stage, displayed on-screen and printed to console once per second.
+- Uses `get_latest_frame_reference()` (zero-copy), `CalibrationManager.raw_to_display()` and `apply_colormap()`.
+- Frame skipping detection via sequence number tracking.
+- Update/paint ratio tracking.
+### Why
+- Isolate exactly which stage is responsible for end-to-end latency without modifying any production code.
+### Files Changed
+- tests/gui_latency_test.py (new file)
+
+## 2026-07-22 12:00
+### What changed
+- Added frame lifecycle instrumentation to `RawFrame`: `grab_start_time`, `grab_complete_time`, `numpy_complete_time`, `publish_time`, and `sequence` fields.
+- Instrumented `_grab_raw_frame()` to populate grab/numpy timestamps from existing `_t0`, `_t1`, `_t3` perf_counter snapshots.
+- Instrumented `_grab_loop()` publish step: sets `publish_time` and `sequence` on each frame before storing as `_latest_frame`.
+- Added `get_latest_frame_reference()` — lock-safe, no-copy accessor for diagnostic use.
+- Added `acquisition_diagnostics()` — returns avg/max grab, convert, and total timing in ms.
+- Removed temporary `_pipeline_trace` / `[TRACE]` debug prints and their supporting attributes.
+- Updated `_copy_frame()` to propagate all new fields.
+### Why
+- Enable a new diagnostic GUI to calculate every stage of the acquisition pipeline per-frame without adding more instrumentation to the driver.
+### Notes
+- No acquisition behavior, threading, locking, NUC logic, or timeout values were modified.
+### Files Changed
+- processing/models/processing_models.py
+- camera/tv46l_camera.py
+
+## 2026-07-22 11:40
+### What changed
+- Added ThermalView paint scheduling diagnostics: update-request counts, paint-execution counts, pending frame, actual painted pixmap frame, and update-to-paint delay.
+- Changed the camera PUBLISH trace from a 5-second stop to continuous one-sample-per-second tracing so delayed onset is visible.
+### Why
+- Runtime evidence showed `update()` requests outpace `paintEvent()` executions, and actual painted frames can lag behind `set_frame()` by several frames.
+### Notes
+- A temporary `repaint()` diagnostic was run and then reverted to permanent `update()` behavior.
+### Files Changed
+- tests/camera_viewer.py
+- camera/tv46l_camera.py
+
+## 2026-07-22 11:15
+### What changed
+- Added runtime pipeline tracing to `_grab_loop()` (PUBLISH trace) and diagnostic counters in `_grab_raw_frame()` to verify the timeout hypothesis with real camera measurements.
+- Verified: 0 timeouts, 0 packet loss, steady 9 FPS, display pipeline latency <10ms with both fixes applied.
+- **Diagnostic fix**: `frame.frame_number` is now set to `self._frame_counter` AFTER the increment (inside the lock), making the `Difference = frame_count - displayed_frame` diagnostic valid. Previously, `RawFrame` was created with `frame_number = self._frame_counter` (pre-increment) in `_grab_raw_frame()`, causing a permanent +1 offset.
+### Why
+- Systematic runtime verification of the progressive lag root cause.
+### Notes
+- Pipeline trace results: 46 unique frames traced over 5s, 820 display polls, 774 repeats (normal — display polls at 100+ Hz, frames arrive at 9 Hz). `pub_to_get` latency: 0.2–9.4ms (well under one frame interval).
+### Files Changed
+- camera/tv46l_camera.py
+
+## 2026-07-22 09:30
+### What changed
+- Added GigE Vision transport tuning params from legacy config: `[Stream]DeviceStreamChannelNegotiatePacketSize=1` (enables jumbo frame negotiation) and `[Stream]GevStreamReceiveSocketSize=1048576` (1MB socket buffer, up from 128KB default).
+- Fixed `grab_image_async` timeout: 100ms → 200ms. At 9 FPS (111ms/frame), the old 100ms timeout was shorter than the frame interval, causing a timeout on every grab attempt — frames accumulated in HALCON's internal buffer, producing progressive display lag. NUC flushed the buffer (temporary fix), but the buffer refilled.
+### Why
+- Root cause analysis verified both hypotheses. The timeout mismatch (100ms < 111ms) is the primary cause of progressive lag. The missing socket config is a secondary factor that amplified transport inefficiency.
+### Files Changed
+- camera/tv46l_camera.py
+
 ## 2026-07-21 17:10
 ### What changed
 - **Fix: lock contention causing gradual GUI lag** — `get_latest_frame()` and `grab_frame()` now grab the `RawFrame` reference under the lock but perform the `image.copy()` **outside** the lock. Lock hold time dropped from ~1-2ms to ~0.001ms per read.
