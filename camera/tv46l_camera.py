@@ -870,6 +870,34 @@ class TV46LCamera:
         b = self.get_focus_distance()
         return abs(b - a) > 1.0
 
+    def perform_nuc(self) -> None:
+        """Execute a synchronous manual NUC in the calling thread."""
+        self._execute_manual_nuc()
+
+    def focus_near(self, step_mm: float = 250) -> tuple[float, float]:
+        """Move focus nearer by step_mm. Returns (target, actual)."""
+        if not self.focus_available():
+            return (0.0, 0.0)
+        current = self.get_focus_distance()
+        min_focus, _ = self.get_focus_limits()
+        target = max(min_focus, current - step_mm)
+        self.set_focus_distance(target)
+        self.wait_for_focus(target)
+        actual = self.get_focus_distance()
+        return (target, actual)
+
+    def focus_far(self, step_mm: float = 250) -> tuple[float, float]:
+        """Move focus farther by step_mm. Returns (target, actual)."""
+        if not self.focus_available():
+            return (0.0, 0.0)
+        current = self.get_focus_distance()
+        _, max_focus = self.get_focus_limits()
+        target = min(max_focus, current + step_mm)
+        self.set_focus_distance(target)
+        self.wait_for_focus(target)
+        actual = self.get_focus_distance()
+        return (target, actual)
+
     def get_focus_limits(self) -> tuple[float, float]:
         return (
             float(

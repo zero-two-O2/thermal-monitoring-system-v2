@@ -1,3 +1,76 @@
+## 2026-07-23 19:30
+### What changed
+- **Phase 2 - Multi-Camera Acquisition Analyzer**: Complete rewrite of the pipeline analyzer for multi-camera diagnostics.
+- **MulticameraAnalyzerManager**: New orchestrator class managing N independent PipelineAnalyzers (one per camera). Single `poll_all()` call drives all cameras.
+- **CrossCameraSyncMonitor**: Tracks frame timestamps across all cameras, measures synchronization drift in ms.
+- **BottleneckDetector**: Automated analysis of all camera snapshots to identify the bottleneck (freeze, publishing, display conversion, Qt paint, camera acquisition, frame loss).
+- **IsolationVerifier + IsolationResult**: Verifies NUC and focus operations on one camera don't pause others. Renders "isolation PASSED" or "isolation FAILED" verdicts.
+- **EventLog**: Thread-safe per-camera event ring buffer (1000 entries) with timestamps.
+- **CrossCameraSnapshot**: Aggregate dataclass with avg FPS, max latency, worst camera, sync drift, bottleneck.
+- **CameraTile**: Clickable per-camera tile with thermal image, FPS (Cam/Pub/Dsp), seq loss, latency, freeze dot, NUC/focus buttons.
+- **TileImageWidget**: Replaces old ThermalDisplayWidget - calls `analyzer.observe_paint_start/complete()` in paintEvent (fixes the "Paint FPS = 0.0" bug).
+- **GlobalSummaryPanel**: Aggregate dashboard showing connected count, avg FPS, bottleneck, sync drift, worst camera.
+- **TimelineView**: Cross-camera per-stage timing comparison table.
+- **EventLogWidget**: Scrolling event log with timestamp+camera ID.
+- **Focus isolation**: Focus near/far operations now check all other cameras for pauses, same as NUC isolation.
+- **Focus buttons on tiles**: << and >> buttons visible only when `camera.focus_available()` returns True.
+- **Per-camera NUC/focus**: Each tile has its own NUC and focus buttons. Operations run with isolation verification.
+- **Reduced diagnostic overhead**: Diagnostics updated at 5Hz (200ms) instead of 30ms, graphs/tables only refresh 5x/sec.
+- **Added `perform_nuc()`, `focus_near()`, `focus_far()`** to old `TV46LCamera` driver (was missing these public methods).
+### Why
+- Phase 1C only analyzed one selected camera. Actual problems only appear when multiple cameras acquire simultaneously.
+- Paint FPS was never recorded (0.0) because `observe_paint_complete()` was never called from any paint event.
+- Need to verify NUC and focus isolation across all cameras automatically.
+- Need automated bottleneck identification without code inspection.
+### Files Changed
+- camera/tv46l_camera.py (added perform_nuc, focus_near, focus_far)
+- tests/pipeline_analyzer/analyzer_core.py (added ~450 lines: MulticameraAnalyzerManager, CrossCameraSnapshot, BottleneckDetector, IsolationVerifier, CrossCameraSyncMonitor, EventLog)
+- tests/pipeline_analyzer/analyzer_ui.py (complete rewrite 1090 -> 1463 lines: CameraTile, TileImageWidget, GlobalSummaryPanel, TimelineView, EventLogWidget, multi-camera AnalyzerWindow)
+- CHANGELOG.md (updated)
+
+## 2026-07-23 18:30
+### What changed
+- **Fixed blank GUI** in Pipeline Analyzer: replaced silent `except Exception: pass` in `_poll_frames()` and `_update_selected_display()` with `print()` logging so errors are visible in console.
+- **Eliminated double `get_frame()`**: `_update_selected_display` now uses `analyzer.last_rgb` (pre-calibrated in `observe_gui_poll()`) instead of re-calling `get_frame()` and recalibrating.
+- **Duplicate-frame guard**: `observe_gui_poll()` returns `None` immediately if `seq == self._last_gui_sequence`, preventing 3-4x processing of the same frame (30ms poll vs ~111ms frame interval).
+- **Error messages on thermal widget**: `show_error()` displays calibration/display errors directly on the `ThermalDisplayWidget` instead of blank screen.
+- **Display FPS accuracy**: `_display_fps` now only records when calibration produces a valid RGB image, not on every poll.
+- **Reset hygiene**: `reset()` clears `_last_rgb` so display goes back to "Waiting for frame..." after reset.
+### Why
+- Silent exception handling made the analyzer uninformative when calibration fails or camera returns unexpected data.
+- Double `get_frame()` could return a different frame than the one lifecycle timestamps were recorded for.
+- Duplicate frame processing inflated FPS metrics and caused unnecessary recalibration cycles.
+### Notes
+- All remaining LSP errors are pre-existing false positives (Pyright vs PyQt6 dynamic typing, unknown `get_frame` return type).
+### Files Changed
+- tests/pipeline_analyzer/analyzer_core.py
+- tests/pipeline_analyzer/analyzer_ui.py
+
+## 2026-07-23 18:00
+### What changed
+- **Phase 1C — Acquisition Pipeline Analyzer**: New `tests/pipeline_analyzer/` module built as a dedicated engineering diagnostic application that observes the production acquisition pipeline without modifying it.
+- **No new acquisition implementation**: Uses the existing `TV46LCamera` (`camera/tv46l_camera.py`) with `RawFrame` timestamps — no new camera driver, acquisition loop, or grabbing thread created.
+- **Multi-FPS metrics**: Separate `Camera FPS`, `Published FPS`, `Display FPS`, `Paint FPS` tracked independently per stage, always shown together to pinpoint where frame loss occurs.
+- **Per-frame lifecycle tracking**: `FrameLifecycle` dataclass records timestamps for every stage (Camera Exposure → HALCON Grab → NumPy Conversion → RawFrame Publish → GUI Receive → Calibration → Colormap → Qt Paint → Paint Complete) — all timestamps belong to the same frame.
+- **Freeze detection**: `FreezeDetector` monitors acquisition age, GUI age, and paint age separately. Reports `Acquisition Freeze`, `GUI Freeze`, or `Paint Freeze` with duration. Automatically detects if acquisition continues but painting stops vs. acquisition itself stops.
+- **Sequence integrity**: `SequenceAnalyzer` tracks expected/received sequence, gap size, lost frames, loss %, consecutive loss, duplicate frames. Statistics available over configurable windows.
+- **Horizontal distortion detection**: Optional frame checksum comparison. Detects repeated rows, partial frame updates, and corruption via MD5 hash comparison.
+- **Delay source identification**: `LatencyAnalyzer` computes percentage contribution per stage group (Camera Acquisition, NumPy, Publication, GUI, Calibration, Display Conversion, Qt Rendering) — immediately identifies the dominant bottleneck.
+- **NUC isolation diagnostics**: `NucIsolationMonitor` records frame timestamps per camera, checks all other cameras BEFORE and AFTER NUC execution on any single camera. Generates `CameraPauseEvent` warnings if another camera pauses (with duration in ms and cause).
+- **Network verification**: Reads transport layer statistics (packet loss, resend requests, duplicate packets, sequence loss %) from the camera's GigE Vision stream counters.
+- **Lightweight mode**: Configurable to disable expensive operations (checksums, full lifecycle tracking) so the analyzer itself never becomes the bottleneck.
+- **Real-time GUI**: Dark-theme diagnostic window with thermal preview, FPS panel, latency breakdown table, per-stage timing table, sequence integrity table, frame lifecycle view, NUC isolation panel, and network stats — all updated in real-time via Qt timers.
+### Why
+- Determine exactly where latency, freezes, horizontal distortion, skipped frames, and delays originate before modifying the production architecture further.
+- NUC isolation testing verifies whether NUC on one camera causes other cameras to pause (shared HALCON lock, global mutex, or synchronous command execution hypothesis).
+- Multi-camera independence verification ensures no camera ever blocks another during NUC, focus, reconnect, or disconnect.
+### Files Changed
+- tests/pipeline_analyzer/__init__.py (new)
+- tests/pipeline_analyzer/__main__.py (new)
+- tests/pipeline_analyzer/analyzer_core.py (new — 811 lines)
+- tests/pipeline_analyzer/analyzer_ui.py (new — 1074 lines)
+- CHANGELOG.md (updated)
+
 ## 2026-07-22 23:00
 ### What changed
 - **Focus sentinel**: Added `FOCUS_UNAVAILABLE_MM = 1000000.0` constant, `focus_available()`, `get_focus_distance_or_none()` to `TV46LCamera`. UI now detects sentinel → disables focus buttons → displays "N/A mm".
