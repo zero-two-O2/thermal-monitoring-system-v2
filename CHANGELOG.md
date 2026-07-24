@@ -1,3 +1,22 @@
+## 2026-07-24
+### What changed
+- **New standalone tool**: `tests/halcon_parameter_explorer.py` — HALCON Parameter Explorer for experimenting with TV46L framegrabber parameters without touching production code.
+- Parameter Browser with three categories: Read Only, Read/Write, Write Only (auto-discovered via HALCON APIs + known registry).
+- Manual Test Box with Read/Write/Execute for ad-hoc parameter testing.
+- Quick Test mode — set `TEST_PARAMETER` constant at the top to auto-test any single parameter on startup.
+- Parameter Inspector showing name, value, HALCON/Python type, access, timestamps, error info.
+- Parameter Scanner that iterates all parameters, classifies them, exports to CSV/JSON.
+- History table with timestamped log of all operations.
+- Live refresh (off/500ms/1s/2s/5s) for the selected parameter.
+- Connect/Disconnect/Reconnect with device discovery via `info_framegrabber`.
+- Standalone — no imports from production code, no modifications to existing system.
+### Why
+- Reverse-engineering tool to discover undocumented TV46L features.
+- Safe experimentation without risk to production monitoring.
+- Build a complete capability database over time via the Parameter Scanner.
+### Files Changed
+- tests/halcon_parameter_explorer.py (new)
+
 ## 2026-07-23 19:30
 ### What changed
 - **Phase 2 - Multi-Camera Acquisition Analyzer**: Complete rewrite of the pipeline analyzer for multi-camera diagnostics.
