@@ -6,17 +6,71 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
-    QGroupBox,
     QLabel,
     QLineEdit,
     QScrollArea,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from gui.theme import (
+    COLOR_PANEL,
+    COLOR_TOOLBAR,
+    COLOR_TEXT_SECONDARY,
+    STYLE_SECTION_HEADER,
+)
+
 from roi.alarm_settings import ROIAlarmCondition
 from roi.configuration import ROIConfiguration
+
+
+class _CollapsibleSection(QWidget):
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
+
+        self._toggle = QToolButton()
+        self._toggle.setText(title)
+        self._toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._toggle.setArrowType(Qt.DownArrow)
+        self._toggle.setCheckable(True)
+        self._toggle.setChecked(True)
+        self._toggle.setStyleSheet(STYLE_SECTION_HEADER)
+        self._toggle.toggled.connect(self._on_toggle)
+        self._layout.addWidget(self._toggle)
+
+        self._content = QWidget()
+        self._content_layout = QFormLayout(self._content)
+        self._content_layout.setContentsMargins(8, 8, 8, 4)
+        self._content_layout.setSpacing(6)
+        self._content_layout.setLabelAlignment(Qt.AlignRight)
+        self._layout.addWidget(self._content)
+
+    def _on_toggle(self, checked: bool) -> None:
+        self._content.setVisible(checked)
+        self._toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+
+    def add_row(self, label: str, widget: QWidget) -> None:
+        self._content_layout.addRow(label, widget)
+
+    def add_widget(self, widget: QWidget) -> None:
+        self._content_layout.addRow(widget)
+
+    def content_layout(self) -> QFormLayout:
+        return self._content_layout
+
+    def set_expanded(self, expanded: bool) -> None:
+        self._toggle.setChecked(expanded)
+        self._content.setVisible(expanded)
+        self._toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+
+    def clear(self) -> None:
+        for i in reversed(range(self._content_layout.rowCount())):
+            self._content_layout.removeRow(i)
 
 
 class ROIPropertyPanel(QWidget):
@@ -25,25 +79,40 @@ class ROIPropertyPanel(QWidget):
     recording_changed = pyqtSignal(str)
     rename_requested = pyqtSignal(str, str)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._current_roi_id: str | None = None
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
         self._content = QWidget()
+        self._content.setStyleSheet(f"background-color: {COLOR_PANEL};")
         self._layout = QVBoxLayout(self._content)
-        self._layout.setSpacing(8)
+        self._layout.setContentsMargins(4, 4, 4, 4)
+        self._layout.setSpacing(4)
 
-        self._build_general()
-        self._build_geometry()
-        self._build_appearance()
-        self._build_alarm()
-        self._build_recording()
-        self._build_metadata()
+        self._no_selection_label = QLabel("Select an ROI to inspect properties.")
+        self._no_selection_label.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY}; font-size: 11px; font-style: italic; padding: 16px;")
+        self._no_selection_label.setAlignment(Qt.AlignCenter)
+        self._layout.addWidget(self._no_selection_label)
 
+        self._props_widget = QWidget()
+        self._props_layout = QVBoxLayout(self._props_widget)
+        self._props_layout.setContentsMargins(0, 0, 0, 0)
+        self._props_layout.setSpacing(4)
+
+        self._build_general_section()
+        self._build_geometry_section()
+        self._build_appearance_section()
+        self._build_alarm_section()
+        self._build_recording_section()
+        self._build_metadata_section()
+
+        self._props_widget.hide()
+        self._layout.addWidget(self._props_widget)
         self._layout.addStretch()
 
         scroll.setWidget(self._content)
@@ -53,124 +122,115 @@ class ROIPropertyPanel(QWidget):
 
         self.clear()
 
-    def _build_general(self) -> None:
-        group = QGroupBox("General")
-        form = QFormLayout(group)
-
+    def _build_general_section(self) -> None:
+        self._general_section = _CollapsibleSection("General")
         self._name_edit = QLineEdit()
         self._name_edit.editingFinished.connect(self._on_name_changed)
-        form.addRow("Name:", self._name_edit)
+        self._general_section.add_row("Name:", self._name_edit)
 
         self._enabled_check = QCheckBox("Enabled")
         self._enabled_check.stateChanged.connect(self._on_enabled_changed)
-        form.addRow("", self._enabled_check)
+        self._general_section.add_widget(self._enabled_check)
 
         self._visible_check = QCheckBox("Visible")
         self._visible_check.stateChanged.connect(self._on_visible_changed)
-        form.addRow("", self._visible_check)
+        self._general_section.add_widget(self._visible_check)
 
-        self._layout.addWidget(group)
+        self._props_layout.addWidget(self._general_section)
 
-    def _build_geometry(self) -> None:
-        group = QGroupBox("Geometry")
-        self._geometry_form = QFormLayout(group)
+    def _build_geometry_section(self) -> None:
+        self._geometry_section = _CollapsibleSection("Geometry")
         self._geometry_fields: dict[str, QDoubleSpinBox] = {}
         self._geom_placeholder = QLabel("Select an ROI to view geometry")
-        self._geom_placeholder.setStyleSheet("color: #888888;")
-        self._geometry_form.addRow(self._geom_placeholder)
-        self._layout.addWidget(group)
+        self._geom_placeholder.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY};")
+        self._geometry_section.add_widget(self._geom_placeholder)
+        self._props_layout.addWidget(self._geometry_section)
 
-    def _build_appearance(self) -> None:
-        group = QGroupBox("Appearance")
-        form = QFormLayout(group)
-
+    def _build_appearance_section(self) -> None:
+        self._appearance_section = _CollapsibleSection("Appearance")
         self._color_edit = QLineEdit()
         self._color_edit.setMaxLength(7)
         self._color_edit.setPlaceholderText("#RRGGBB")
         self._color_edit.editingFinished.connect(self._on_color_changed)
-        form.addRow("Color:", self._color_edit)
+        self._appearance_section.add_row("Color:", self._color_edit)
 
         self._line_width_spin = QSpinBox()
         self._line_width_spin.setRange(1, 10)
         self._line_width_spin.valueChanged.connect(self._on_line_width_changed)
-        form.addRow("Line Width:", self._line_width_spin)
+        self._appearance_section.add_row("Line Width:", self._line_width_spin)
 
-        self._layout.addWidget(group)
+        self._props_layout.addWidget(self._appearance_section)
 
-    def _build_alarm(self) -> None:
-        group = QGroupBox("Alarm")
-        form = QFormLayout(group)
-
+    def _build_alarm_section(self) -> None:
+        self._alarm_section = _CollapsibleSection("Alarm")
         self._alarm_enabled_check = QCheckBox("Alarm Enabled")
         self._alarm_enabled_check.stateChanged.connect(self._on_alarm_changed)
-        form.addRow("", self._alarm_enabled_check)
+        self._alarm_section.add_widget(self._alarm_enabled_check)
 
         self._condition_combo = QComboBox()
         for c in ROIAlarmCondition:
             self._condition_combo.addItem(c.name, c)
         self._condition_combo.currentIndexChanged.connect(self._on_alarm_changed)
-        form.addRow("Condition:", self._condition_combo)
+        self._alarm_section.add_row("Condition:", self._condition_combo)
 
         self._threshold_spin = QDoubleSpinBox()
         self._threshold_spin.setRange(-100, 500)
         self._threshold_spin.setDecimals(1)
-        self._threshold_spin.setSuffix(" °C")
+        self._threshold_spin.setSuffix(" \u00b0C")
         self._threshold_spin.editingFinished.connect(self._on_alarm_changed)
-        form.addRow("Threshold:", self._threshold_spin)
+        self._alarm_section.add_row("Threshold:", self._threshold_spin)
 
         self._hysteresis_spin = QDoubleSpinBox()
         self._hysteresis_spin.setRange(0, 100)
         self._hysteresis_spin.setDecimals(1)
-        self._hysteresis_spin.setSuffix(" °C")
+        self._hysteresis_spin.setSuffix(" \u00b0C")
         self._hysteresis_spin.editingFinished.connect(self._on_alarm_changed)
-        form.addRow("Hysteresis:", self._hysteresis_spin)
+        self._alarm_section.add_row("Hysteresis:", self._hysteresis_spin)
 
         self._delay_spin = QSpinBox()
         self._delay_spin.setRange(0, 60000)
         self._delay_spin.setSuffix(" ms")
         self._delay_spin.editingFinished.connect(self._on_alarm_changed)
-        form.addRow("Delay:", self._delay_spin)
+        self._alarm_section.add_row("Delay:", self._delay_spin)
 
-        self._layout.addWidget(group)
+        self._props_layout.addWidget(self._alarm_section)
 
-    def _build_recording(self) -> None:
-        group = QGroupBox("Recording")
-        form = QFormLayout(group)
-
+    def _build_recording_section(self) -> None:
+        self._recording_section = _CollapsibleSection("Recording")
         self._rec_enabled_check = QCheckBox("Recording Enabled")
         self._rec_enabled_check.stateChanged.connect(self._on_recording_changed)
-        form.addRow("", self._rec_enabled_check)
+        self._recording_section.add_widget(self._rec_enabled_check)
 
         self._duration_spin = QSpinBox()
         self._duration_spin.setRange(1, 3600)
         self._duration_spin.setSuffix(" s")
         self._duration_spin.editingFinished.connect(self._on_recording_changed)
-        form.addRow("Duration:", self._duration_spin)
+        self._recording_section.add_row("Duration:", self._duration_spin)
 
-        self._layout.addWidget(group)
+        self._props_layout.addWidget(self._recording_section)
 
-    def _build_metadata(self) -> None:
-        group = QGroupBox("Metadata")
-        form = QFormLayout(group)
-
+    def _build_metadata_section(self) -> None:
+        self._metadata_section = _CollapsibleSection("Metadata")
         self._roi_id_label = QLabel("")
         self._roi_id_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        form.addRow("ID:", self._roi_id_label)
+        self._metadata_section.add_row("ID:", self._roi_id_label)
 
         self._created_label = QLabel("")
-        form.addRow("Created:", self._created_label)
+        self._metadata_section.add_row("Created:", self._created_label)
 
         self._modified_label = QLabel("")
-        form.addRow("Modified:", self._modified_label)
+        self._metadata_section.add_row("Modified:", self._modified_label)
 
         self._description_edit = QLineEdit()
         self._description_edit.editingFinished.connect(self._on_description_changed)
-        form.addRow("Description:", self._description_edit)
+        self._metadata_section.add_row("Description:", self._description_edit)
 
-        self._layout.addWidget(group)
+        self._props_layout.addWidget(self._metadata_section)
 
     def load_roi(self, config: ROIConfiguration) -> None:
         self._current_roi_id = config.roi_id
+        self._no_selection_label.hide()
+        self._props_widget.show()
 
         block = self.blockSignals(True)
 
@@ -202,8 +262,14 @@ class ROIPropertyPanel(QWidget):
     def is_current_roi(self, roi_id: str) -> bool:
         return self._current_roi_id == roi_id
 
+    def get_current_roi_id(self) -> str | None:
+        return self._current_roi_id
+
     def clear(self) -> None:
         self._current_roi_id = None
+        self._no_selection_label.show()
+        self._props_widget.hide()
+
         block = self.blockSignals(True)
         self._name_edit.clear()
         self._enabled_check.setChecked(True)
@@ -227,7 +293,7 @@ class ROIPropertyPanel(QWidget):
         shape_type = config.geometry.type
         fields = self._get_geometry_fields(config)
         if not fields:
-            self._geometry_form.addRow(QLabel(shape_type.capitalize()))
+            self._geometry_section.add_row(shape_type.capitalize(), QLabel(""))
             return
 
         for name, value in fields.items():
@@ -237,34 +303,27 @@ class ROIPropertyPanel(QWidget):
             spin.setValue(float(value))
             spin.setReadOnly(True)
             spin.setButtonSymbols(QDoubleSpinBox.NoButtons)
+            spin.setStyleSheet(f"background-color: {COLOR_TOOLBAR};")
             self._geometry_fields[name] = spin
-            self._geometry_form.addRow(f"{name}:", spin)
+            self._geometry_section.add_row(name + ":", spin)
 
     def _clear_geometry(self) -> None:
         for field in list(self._geometry_fields.keys()):
             widget = self._geometry_fields.pop(field)
-            self._geometry_form.removeRow(widget)
             widget.deleteLater()
-        row = self._geometry_form.rowCount()
-        while row > 0:
-            row -= 1
-            item = self._geometry_form.itemAt(row)
-            if item is not None:
-                w = item.widget()
-                if w is not None:
-                    self._geometry_form.removeRow(w)
+        self._geometry_section.clear()
 
     def _get_geometry_fields(self, config: ROIConfiguration) -> dict[str, float]:
         g = config.geometry
         shape_type = g.type
         if shape_type == "rectangle1":
-            return {"row1": g.row1, "col1": g.col1, "row2": g.row2, "col2": g.col2}
+            return {"Row1": g.row1, "Col1": g.col1, "Row2": g.row2, "Col2": g.col2}
         elif shape_type == "rectangle2":
-            return {"row": g.row, "col": g.col, "phi": g.phi, "length1": g.length1, "length2": g.length2}
+            return {"Row": g.row, "Col": g.col, "Phi": g.phi, "Length1": g.length1, "Length2": g.length2}
         elif shape_type == "circle":
-            return {"row": g.row, "col": g.col, "radius": g.radius}
+            return {"Row": g.row, "Col": g.col, "Radius": g.radius}
         elif shape_type == "ellipse":
-            return {"row": g.row, "col": g.col, "phi": g.phi, "radius1": g.radius1, "radius2": g.radius2}
+            return {"Row": g.row, "Col": g.col, "Phi": g.phi, "Radius1": g.radius1, "Radius2": g.radius2}
         return {}
 
     def _on_name_changed(self) -> None:
@@ -297,6 +356,3 @@ class ROIPropertyPanel(QWidget):
     def _emit_appearance(self) -> None:
         if self._current_roi_id:
             self.appearance_changed.emit(self._current_roi_id)
-
-    def get_current_roi_id(self) -> str | None:
-        return self._current_roi_id

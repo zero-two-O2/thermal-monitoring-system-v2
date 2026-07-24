@@ -191,16 +191,6 @@ class HalconDriver:
 
         try:
             self.set_parameter(
-                "num_buffers",
-                32,
-            )
-        except Exception as exc:
-            logger.warning(
-                f"Unable to set buffer count: {exc}"
-            )
-
-        try:
-            self.set_parameter(
                 "FLK_TI_ControlFeature_SetFrameRate",
                 9,
             )

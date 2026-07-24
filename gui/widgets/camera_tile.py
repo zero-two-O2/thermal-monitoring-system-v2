@@ -1,308 +1,182 @@
-"""
-camera_tile.py
-
-Compact, selectable camera tile widget for the qualification tool.
-
-Each tile displays:
-- Thermal image (~80% of space)
-- Compact status bar (Frame, Seq, Lat, Drop, TO)
-- SELECTED indicator when active
-- Click-to-select behavior
-"""
-
 from __future__ import annotations
 
 import numpy as np
-from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QImage
-from PyQt5.QtGui import QPixmap
-from PyQt5.QtWidgets import QFrame
-from PyQt5.QtWidgets import QHBoxLayout
-from PyQt5.QtWidgets import QLabel
-from PyQt5.QtWidgets import QVBoxLayout
+from PyQt5.QtCore import pyqtSignal, Qt
+from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
+
+from gui.theme import (
+    COLOR_ACCENT,
+    COLOR_PANEL,
+    COLOR_BORDER,
+    COLOR_TEXT_PRIMARY,
+    COLOR_TEXT_SECONDARY,
+    COLOR_ALARM_GREEN,
+    COLOR_ALARM_RED,
+    COLOR_ALARM_GRAY,
+    COLOR_ALARM_ORANGE,
+    COLOR_TOOLBAR,
+)
 
 
-STYLE_TILE_DEFAULT = """
-QFrame#cameraTile {
-    background-color: #F5F5F5;
-    border: 2px solid #CCCCCC;
+STYLE_TILE = f"""
+QFrame#cameraTile {{
+    background-color: {COLOR_PANEL};
+    border: 1px solid {COLOR_BORDER};
     border-radius: 4px;
-}
-QFrame#cameraTile:hover {
-    border: 2px solid #999999;
-}
-"""
-
-STYLE_TILE_SELECTED = """
-QFrame#cameraTile {
-    background-color: #E8F0FE;
-    border: 3px solid #1A73E8;
-    border-radius: 4px;
-}
-"""
-
-STYLE_LABEL_SELECTED = """
-QLabel {
-    color: #1A73E8;
-    font-weight: bold;
-    font-size: 10px;
-}
-"""
-
-STYLE_STAT_LABEL = """
-QLabel {
-    color: #333333;
-    font-size: 11px;
-    font-family: "Consolas", "Courier New", monospace;
-}
-"""
-
-STYLE_CAMERA_NAME = """
-QLabel {
-    color: #1A1A1A;
-    font-size: 12px;
-    font-weight: bold;
-}
+}}
+QFrame#cameraTile:hover {{
+    border: 1px solid {COLOR_ACCENT};
+}}
 """
 
 
 class CameraTile(QFrame):
-    """
-    Compact camera tile with thermal image and statistics.
-    """
-
     clicked = pyqtSignal(str)
+    double_clicked = pyqtSignal(str)
 
-    SELECTED_STYLESHEET = STYLE_TILE_SELECTED
-    DEFAULT_STYLESHEET = STYLE_TILE_DEFAULT
-
-    def __init__(
-        self,
-        camera_id: str,
-        camera_name: str,
-        parent=None,
-    ) -> None:
-
+    def __init__(self, camera_id: str, camera_name: str, parent=None) -> None:
         super().__init__(parent)
 
         self._camera_id = camera_id
         self._camera_name = camera_name
-        self._selected = False
-        self._frame_count = 0
-        self._sequence = 0
-        self._latency_ms = 0.0
-        self._dropped = 0
-        self._timeouts = 0
-        self._fps = 0.0
-        self._last_frame_time = 0.0
+        self._connected = False
         self._pixmap: QPixmap | None = None
 
         self.setObjectName("cameraTile")
         self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet(STYLE_TILE_DEFAULT)
+        self.setStyleSheet(STYLE_TILE)
 
         self._build_ui()
-
-    # ---------------------------------------------------------
-    # Properties
-    # ---------------------------------------------------------
+        self._update_status_ui()
 
     @property
     def camera_id(self) -> str:
-
         return self._camera_id
 
-    @property
-    def is_selected(self) -> bool:
+    def set_camera_id(self, camera_id: str) -> None:
+        self._camera_id = camera_id
 
-        return self._selected
+    def set_camera_name(self, name: str) -> None:
+        self._camera_name = name
+        self._name_label.setText(name)
 
-    def set_selected(
-        self,
-        selected: bool,
-    ) -> None:
+    def set_connected(self, connected: bool) -> None:
+        self._connected = connected
+        self._update_status_ui()
 
-        self._selected = selected
+    def set_position(self, position: str) -> None:
+        self._position_label.setText(position if position else "---")
 
-        if selected:
+    def set_fps(self, fps: float) -> None:
+        self._fps_label.setText(f"{fps:.1f} FPS")
 
-            self.setStyleSheet(STYLE_TILE_SELECTED)
-            self._selected_label.show()
-
+    def set_alarm(self, alarm: bool, level: str = "") -> None:
+        if alarm:
+            color = COLOR_ALARM_RED if level == "CRITICAL" else COLOR_ALARM_ORANGE
+            self._alarm_label.setText("ALARM")
+            self._alarm_label.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 10px; padding: 1px 4px; background-color: {color}20; border-radius: 2px;")
+            self._alarm_label.show()
         else:
+            self._alarm_label.hide()
 
-            self.setStyleSheet(STYLE_TILE_DEFAULT)
-            self._selected_label.hide()
+    def assign_camera(self, camera_id: str, name: str) -> None:
+        self._camera_id = camera_id
+        self._camera_name = name
+        self._name_label.setText(name if name else "No Camera")
+        self._name_label.setStyleSheet(f"font-size: 12px; font-weight: bold; color: {COLOR_TEXT_PRIMARY};")
+
+    def clear_camera(self) -> None:
+        self._camera_id = ""
+        self._camera_name = ""
+        self._name_label.setText("No Camera")
+        self._name_label.setStyleSheet(f"font-size: 12px; font-weight: bold; color: {COLOR_ALARM_GRAY};")
+        self._connected = False
+        self._pixmap = None
+        self._image_label.clear()
+        self._image_label.setStyleSheet(f"background-color: {COLOR_TOOLBAR}; border: 1px solid {COLOR_BORDER};")
+        self._status_label.setText("Disconnected")
+        self._status_label.setStyleSheet(f"color: {COLOR_ALARM_GRAY}; font-size: 10px;")
+        self._position_label.setText("---")
+        self._fps_label.setText("")
+        self._alarm_label.hide()
 
     # ---------------------------------------------------------
     # UI
     # ---------------------------------------------------------
 
     def _build_ui(self) -> None:
-
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(2)
-
-        #
-        # Camera name + SELECTED badge
-        #
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
 
         header = QHBoxLayout()
-        header.setSpacing(4)
-
+        header.setSpacing(6)
         self._name_label = QLabel(self._camera_name)
-        self._name_label.setStyleSheet(STYLE_CAMERA_NAME)
-
-        self._selected_label = QLabel("SELECTED")
-        self._selected_label.setStyleSheet(STYLE_LABEL_SELECTED)
-        self._selected_label.hide()
-
+        self._name_label.setStyleSheet(f"font-size: 12px; font-weight: bold; color: {COLOR_TEXT_PRIMARY};")
         header.addWidget(self._name_label)
-        header.addStretch()
-        header.addWidget(self._selected_label)
 
+        self._alarm_label = QLabel()
+        self._alarm_label.hide()
+        header.addWidget(self._alarm_label)
+
+        header.addStretch()
+
+        self._status_label = QLabel()
+        self._status_label.setStyleSheet(f"color: {COLOR_ALARM_GREEN}; font-size: 10px;")
+        header.addWidget(self._status_label)
         layout.addLayout(header)
 
-        #
-        # Thermal image
-        #
-
         self._image_label = QLabel()
-        self._image_label.setAlignment(
-            Qt.AlignCenter
-        )
-        self._image_label.setMinimumSize(120, 120)
-        self._image_label.setStyleSheet(
-            "background-color: #E0E0E0; border: 1px solid #CCCCCC;"
-        )
+        self._image_label.setAlignment(Qt.AlignCenter)
+        self._image_label.setMinimumSize(80, 60)
+        self._image_label.setStyleSheet(f"background-color: {COLOR_TOOLBAR}; border: 1px solid {COLOR_BORDER}; border-radius: 2px;")
+        layout.addWidget(self._image_label, 1)
 
-        layout.addWidget(
-            self._image_label,
-            stretch=1,
-        )
+        info_row = QHBoxLayout()
+        info_row.setSpacing(8)
+        self._position_label = QLabel("---")
+        self._position_label.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY}; font-size: 10px;")
+        self._fps_label = QLabel("")
+        self._fps_label.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY}; font-size: 10px;")
+        info_row.addWidget(self._position_label)
+        info_row.addStretch()
+        info_row.addWidget(self._fps_label)
+        layout.addLayout(info_row)
 
-        #
-        # Compact status bar
-        #
-
-        stats = QHBoxLayout()
-        stats.setSpacing(8)
-
-        self._frame_label = QLabel("F:0")
-        self._seq_label = QLabel("S:0")
-        self._lat_label = QLabel("L:0ms")
-        self._drop_label = QLabel("D:0")
-        self._to_label = QLabel("T:0")
-        self._fps_label = QLabel("FPS:0")
-
-        for label in (
-            self._frame_label,
-            self._seq_label,
-            self._lat_label,
-            self._drop_label,
-            self._to_label,
-            self._fps_label,
-        ):
-            label.setStyleSheet(STYLE_STAT_LABEL)
-            stats.addWidget(label)
-
-        layout.addLayout(stats)
+    def _update_status_ui(self) -> None:
+        if self._connected:
+            self._status_label.setText("Connected")
+            self._status_label.setStyleSheet(f"color: {COLOR_ALARM_GREEN}; font-size: 10px;")
+        else:
+            self._status_label.setText("Disconnected")
+            self._status_label.setStyleSheet(f"color: {COLOR_ALARM_GRAY}; font-size: 10px;")
 
     # ---------------------------------------------------------
     # Frame Update
     # ---------------------------------------------------------
 
-    def update_frame(
-        self,
-        image: np.ndarray | None,
-        frame_count: int = 0,
-        sequence: int = 0,
-        latency_ms: float = 0.0,
-        dropped: int = 0,
-        timeouts: int = 0,
-        fps: float = 0.0,
-    ) -> None:
-
-        self._frame_count = frame_count
-        self._sequence = sequence
-        self._latency_ms = latency_ms
-        self._dropped = dropped
-        self._timeouts = timeouts
-        self._fps = fps
-
+    def update_frame(self, image: np.ndarray | None = None, frame_count: int = 0, sequence: int = 0, latency_ms: float = 0.0, dropped: int = 0, timeouts: int = 0, fps: float = 0.0) -> None:
         if image is not None:
-
             self._update_pixmap(image)
+        if fps > 0:
+            self._fps_label.setText(f"{fps:.1f} FPS")
 
-        self._update_stats()
-
-    def _update_pixmap(
-        self,
-        image: np.ndarray,
-    ) -> None:
-
+    def _update_pixmap(self, image: np.ndarray) -> None:
         h, w = image.shape[:2]
         bytes_per_line = 3 * w
-
-        qimage = QImage(
-            image.data,
-            w,
-            h,
-            bytes_per_line,
-            QImage.Format_RGB888,
-        )
-
-        self._pixmap = QPixmap.fromImage(
-            qimage
-        )
-
+        qimage = QImage(image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        self._pixmap = QPixmap.fromImage(qimage)
         self._scale_pixmap()
 
     def _scale_pixmap(self) -> None:
-
         if self._pixmap is None:
             return
-
         label_size = self._image_label.size()
-
-        scaled = self._pixmap.scaled(
-            label_size.width(),
-            label_size.height(),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
-
+        scaled = self._pixmap.scaled(label_size.width(), label_size.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._image_label.setPixmap(scaled)
 
-    def _update_stats(self) -> None:
-
-        self._frame_label.setText(
-            f"F:{self._frame_count}"
-        )
-        self._seq_label.setText(
-            f"S:{self._sequence}"
-        )
-        self._lat_label.setText(
-            f"L:{self._latency_ms:.0f}ms"
-        )
-        self._drop_label.setText(
-            f"D:{self._dropped}"
-        )
-        self._to_label.setText(
-            f"T:{self._timeouts}"
-        )
-        self._fps_label.setText(
-            f"FPS:{self._fps:.0f}"
-        )
-
-    # ---------------------------------------------------------
-    # Resize
-    # ---------------------------------------------------------
-
     def resizeEvent(self, event) -> None:
-
         super().resizeEvent(event)
         self._scale_pixmap()
 
@@ -311,6 +185,10 @@ class CameraTile(QFrame):
     # ---------------------------------------------------------
 
     def mousePressEvent(self, event) -> None:
-
         self.clicked.emit(self._camera_id)
         super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if self._camera_id:
+            self.double_clicked.emit(self._camera_id)
+        super().mouseDoubleClickEvent(event)

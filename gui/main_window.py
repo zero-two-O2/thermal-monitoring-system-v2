@@ -1,949 +1,808 @@
-"""
-main_window.py
-
-Qualification tool main window.
-
-Layout:
-    Top:    Responsive grid of camera tiles (images + compact status)
-    Bottom: Camera Control Panel (NUC, Focus, info) for selected camera
-
-Uses existing production APIs:
-    TV46LCamera.perform_nuc()
-    TV46LCamera.focus_near()
-    TV46LCamera.focus_far()
-    TV46LCamera.get_focus_distance()
-"""
-
 from __future__ import annotations
 
-import numpy as np
-from PyQt5.QtCore import QTimer
-from PyQt5.QtCore import Qt
+from datetime import datetime
+
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QCloseEvent
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtWidgets import QGridLayout
-from PyQt5.QtWidgets import QHBoxLayout
-from PyQt5.QtWidgets import QLabel
-from PyQt5.QtWidgets import QMainWindow
-from PyQt5.QtWidgets import QPushButton
-from PyQt5.QtWidgets import QSplitter
-from PyQt5.QtWidgets import QStatusBar
-from PyQt5.QtWidgets import QVBoxLayout
-from PyQt5.QtWidgets import QWidget
+from PyQt5.QtWidgets import (
+    QAction,
+    QCheckBox,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from app.application_controller import ApplicationController
-from camera.models.camera_context import CameraContext
 
-from gui.widgets.camera_control_panel import CameraControlPanel
-from gui.widgets.camera_tile import CameraTile
-
-from gui.roi import (
-    ROISignalBus,
-    ROISelectionManager,
-    ROIDirtyTracker,
-    ROIWorkspace,
-    ROIListWidget,
-    ROIPropertyPanel,
-    ROIToolbar,
+from gui.theme import (
+    COLOR_ACCENT,
+    COLOR_PANEL,
+    COLOR_BORDER,
+    COLOR_TOOLBAR,
+    COLOR_TEXT_PRIMARY,
+    COLOR_TEXT_SECONDARY,
+    COLOR_ALARM_GREEN,
+    COLOR_ALARM_RED,
+    COLOR_ALARM_GRAY,
+    COLOR_ALARM_ORANGE,
+    COLOR_TEXT_DISABLED,
+    COLOR_SELECTION,
+    COLOR_BACKGROUND,
+    STYLE_MAIN_WINDOW,
+    STYLE_TOOLBAR_BUTTON,
 )
-from roi.acquisition_state import AcquisitionState
-from roi.editor.editor_manager import ROIEditorManager
-from roi.persistence.repository import JSONROIRepository
 
 from utilities import logger
 
 
-LIGHT_THEME = """
-QMainWindow {
-    background-color: #FFFFFF;
-}
-QWidget {
-    background-color: #FFFFFF;
-    color: #1A1A1A;
-    font-family: "Segoe UI", "Arial", sans-serif;
-    font-size: 11px;
-}
-QPushButton {
-    background-color: #F0F0F0;
-    color: #333333;
-    border: 1px solid #CCCCCC;
-    border-radius: 3px;
-    padding: 6px 16px;
-    font-size: 11px;
-}
-QPushButton:hover {
-    background-color: #E0E0E0;
-    border: 1px solid #999999;
-}
-QPushButton:pressed {
-    background-color: #D0D0D0;
-}
-QPushButton:disabled {
-    background-color: #F5F5F5;
-    color: #AAAAAA;
-    border: 1px solid #DDDDDD;
-}
-QStatusBar {
-    background-color: #F5F5F5;
-    border-top: 1px solid #D0D0D0;
-    color: #555555;
-    font-size: 10px;
-}
-QStatusBar QLabel {
-    color: #555555;
-    font-size: 10px;
-}
-QSplitter::handle {
-    background-color: #D0D0D0;
-    height: 1px;
-}
-"""
+COL_CHECK = 0
+COL_STATUS = 1
+COL_NAME = 2
+COL_SERIAL = 3
+COL_IP = 4
+COL_POSITION = 5
+COL_MODEL = 6
+COL_CONNECTED = 7
+
+HEADERS = [
+    "",
+    "",
+    "Camera Name",
+    "Serial Number",
+    "IP Address",
+    "Position",
+    "Model",
+    "Connected",
+]
+
+COL_COUNT = len(HEADERS)
+
+class _ConnectionBadge(QLabel):
+    def __init__(self, label: str, parent=None) -> None:
+        super().__init__(parent)
+        self._label = label
+        self._state = "unknown"
+        self._detail = ""
+        self._update_display()
+
+    def set_state(self, state: str, detail: str = "") -> None:
+        self._state = state
+        self._detail = detail
+        self._update_display()
+
+    def _update_display(self) -> None:
+        dots = {"ok": "\u25CF", "warn": "\u26A0", "error": "\u2718", "unknown": "\u25CB"}
+        colors = {
+            "ok": COLOR_ALARM_GREEN,
+            "warn": COLOR_ALARM_ORANGE,
+            "error": COLOR_ALARM_RED,
+            "unknown": COLOR_ALARM_GRAY,
+        }
+        dot = dots.get(self._state, "\u25CB")
+        color = colors.get(self._state, COLOR_ALARM_GRAY)
+        text = f"{dot} {self._label}"
+        if self._detail:
+            text += f" {self._detail}"
+        self.setText(text)
+        self.setStyleSheet(
+            f"color: {color}; font-size: 11px; font-weight: bold; "
+            f"padding: 2px 10px; border-left: 1px solid {COLOR_BORDER};"
+        )
 
 
 class MainWindow(QMainWindow):
-    """
-    Qualification tool main window.
-    """
+    calibration_requested = pyqtSignal()
+    observation_requested = pyqtSignal()
+    camera_detail_requested = pyqtSignal(str)
+    discover_requested = pyqtSignal()
 
-    POLL_INTERVAL_MS = 33
+    POLL_INTERVAL_MS = 2000
+    CLOCK_INTERVAL_MS = 1000
 
-    def __init__(
-        self,
-        controller: ApplicationController,
-    ) -> None:
-
+    def __init__(self, controller: ApplicationController) -> None:
         super().__init__()
 
         self._controller = controller
+        self._camera_rows: dict[str, int] = {}
+        self._badges: dict[str, _ConnectionBadge] = {}
+        self._selected_camera_id: str | None = None
 
-        self._tiles: dict[str, CameraTile] = {}
-        self._cameras: list[CameraContext] = []
-
-        self._poll_timer = QTimer(self)
-        self._poll_timer.timeout.connect(
-            self._poll_frames
-        )
-
-        self._focus_busy = False
-        self._nuc_busy = False
-
-        self._init_roi()
+        self._build_menu_bar()
         self._build_ui()
         self._apply_theme()
-        self._connect_roi_signals()
+        self._connect_signals()
+        self._update_button_states()
+
+        self._poll_timer = QTimer(self)
+        self._poll_timer.timeout.connect(self._poll_status)
+        self._poll_timer.start(self.POLL_INTERVAL_MS)
+
+        self._clock_timer = QTimer(self)
+        self._clock_timer.timeout.connect(self._update_clock)
+        self._clock_timer.start(self.CLOCK_INTERVAL_MS)
+        self._update_clock()
 
     # ---------------------------------------------------------
-    # ROI Initialization
+    # Menu Bar
     # ---------------------------------------------------------
 
-    def _init_roi(self) -> None:
-        self._roi_signal_bus = ROISignalBus()
-        self._roi_selection = ROISelectionManager()
-        self._roi_dirty = ROIDirtyTracker()
-        self._roi_editor_mgr = ROIEditorManager(window_handle=0)
-        self._roi_repo = JSONROIRepository("./data/roi")
-        self._roi_workspace = ROIWorkspace(
-            signal_bus=self._roi_signal_bus,
-            repository=self._roi_repo,
-            selection_manager=self._roi_selection,
-            dirty_tracker=self._roi_dirty,
-            editor_manager=self._roi_editor_mgr,
-        )
-        self._roi_list = None
-        self._roi_property = None
-        self._roi_toolbar = None
+    def _build_menu_bar(self) -> None:
+        menu_bar = self.menuBar()
+
+        file_menu = menu_bar.addMenu("File")
+        self._new_project_action = QAction("New Project", self)
+        self._open_project_action = QAction("Open Project...", self)
+        self._save_project_action = QAction("Save Project", self)
+        self._save_project_action.setEnabled(False)
+        file_menu.addAction(self._new_project_action)
+        file_menu.addAction(self._open_project_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self._save_project_action)
+        file_menu.addSeparator()
+
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        camera_menu = menu_bar.addMenu("Camera")
+        self._menu_discover = QAction("Discover", self)
+        self._menu_connect = QAction("Connect All", self)
+        self._menu_disconnect = QAction("Disconnect All", self)
+        self._menu_refresh = QAction("Refresh", self)
+        camera_menu.addAction(self._menu_discover)
+        camera_menu.addAction(self._menu_connect)
+        camera_menu.addAction(self._menu_disconnect)
+        camera_menu.addAction(self._menu_refresh)
+
+        view_menu = menu_bar.addMenu("View")
+        self._menu_calibration = QAction("Calibration Window", self)
+        self._menu_observation = QAction("Observation Window", self)
+        view_menu.addAction(self._menu_calibration)
+        view_menu.addAction(self._menu_observation)
+
+        help_menu = menu_bar.addMenu("Help")
+        about_action = QAction("About", self)
+        help_menu.addAction(about_action)
 
     # ---------------------------------------------------------
     # UI Build
     # ---------------------------------------------------------
 
     def _build_ui(self) -> None:
-
-        self.setWindowTitle(
-            "Thermal Monitoring System - Camera Qualification Tool"
-        )
-        self.setMinimumSize(1024, 700)
+        self.setWindowTitle("Thermal Monitoring System")
+        self.setMinimumSize(1100, 780)
+        self.resize(1400, 900)
 
         central = QWidget()
         self.setCentralWidget(central)
-
         root = QVBoxLayout(central)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(8)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        #
-        # Toolbar
-        #
+        self._build_header(root)
+        self._build_toolbar(root)
+        self._build_utilities(root)
+        content = self._build_content()
+        root.addWidget(content, 1)
+        self._build_status_bar()
 
-        toolbar = self._build_toolbar()
-        root.addWidget(toolbar)
+    def _build_header(self, root: QVBoxLayout) -> None:
+        header = QWidget()
+        header.setStyleSheet(f"background-color: {COLOR_PANEL}; border-bottom: 1px solid {COLOR_BORDER};")
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setSpacing(0)
 
-        #
-        # Splitter: Top (Tiles + ROI) / Control Panel (bottom)
-        #
-
-        v_splitter = QSplitter(Qt.Vertical)
-
-        #
-        # Top: Horizontal splitter with Camera Tiles (left) + ROI Panel (right)
-        #
-
-        top_splitter = QSplitter(Qt.Horizontal)
-
-        #
-        # Camera Tile Grid
-        #
-
-        self._tile_container = QWidget()
-        self._tile_grid = QGridLayout(
-            self._tile_container
-        )
-        self._tile_grid.setContentsMargins(0, 0, 0, 0)
-        self._tile_grid.setSpacing(6)
-
-        self._empty_label = QLabel(
-            "No cameras connected.\n\n"
-            "Use Start All to begin acquisition."
-        )
-        self._empty_label.setAlignment(
-            Qt.AlignCenter
-        )
-        self._empty_label.setStyleSheet(
-            "color: #999999; font-size: 16px;"
-        )
-        self._tile_grid.addWidget(
-            self._empty_label,
-            0,
-            0,
-        )
-
-        top_splitter.addWidget(self._tile_container)
-
-        #
-        # ROI Panel
-        #
-
-        roi_panel = self._build_roi_panel()
-        roi_panel.setMinimumWidth(300)
-        top_splitter.addWidget(roi_panel)
-
-        top_splitter.setStretchFactor(0, 3)
-        top_splitter.setStretchFactor(1, 1)
-
-        v_splitter.addWidget(top_splitter)
-
-        #
-        # Camera Control Panel
-        #
-
-        self._control_panel = CameraControlPanel()
-        self._control_panel.nuc_clicked.connect(
-            self._on_nuc_clicked
-        )
-        self._control_panel.focus_near_clicked.connect(
-            self._on_focus_near
-        )
-        self._control_panel.focus_far_clicked.connect(
-            self._on_focus_far
-        )
-
-        v_splitter.addWidget(self._control_panel)
-
-        v_splitter.setStretchFactor(0, 3)
-        v_splitter.setStretchFactor(1, 1)
-
-        root.addWidget(v_splitter)
-
-        #
-        # Status Bar
-        #
-
-        self._status_bar = QStatusBar()
-        self.setStatusBar(self._status_bar)
-
-        self._status_label = QLabel("Ready")
-        self._status_bar.addWidget(
-            self._status_label
-        )
-
-        self._fps_status_label = QLabel("")
-        self._status_bar.addPermanentWidget(
-            self._fps_status_label
-        )
-
-        self._camera_count_label = QLabel("Cameras: 0")
-        self._status_bar.addPermanentWidget(
-            self._camera_count_label
-        )
-
-    def _build_toolbar(self) -> QWidget:
-
-        bar = QWidget()
-        bar.setStyleSheet(
-            "background-color: #F5F5F5;"
-            "border: 1px solid #D0D0D0;"
-            "border-radius: 3px;"
-        )
-
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(8, 4, 8, 4)
-        layout.setSpacing(6)
-
-        title = QLabel("Camera Qualification Tool")
-        title.setStyleSheet(
-            "font-size: 14px; font-weight: bold;"
-            "color: #1A1A1A;"
-        )
-        layout.addWidget(title)
-        layout.addSpacing(16)
-
-        self._start_all_btn = QPushButton("Start All")
-        self._start_all_btn.clicked.connect(
-            self._on_start_all
-        )
-        layout.addWidget(self._start_all_btn)
-
-        self._stop_all_btn = QPushButton("Stop All")
-        self._stop_all_btn.clicked.connect(
-            self._on_stop_all
-        )
-        layout.addWidget(self._stop_all_btn)
+        left = QVBoxLayout()
+        left.setSpacing(2)
+        title = QLabel("Thermal Monitoring System")
+        title.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLOR_TEXT_PRIMARY};")
+        left.addWidget(title)
+        project_row = QHBoxLayout()
+        project_row.setSpacing(16)
+        self._project_label = QLabel("Project: TV46L")
+        self._project_label.setStyleSheet(f"font-size: 11px; color: {COLOR_TEXT_SECONDARY};")
+        self._config_label = QLabel("Configuration: Under Production")
+        self._config_label.setStyleSheet(f"font-size: 11px; color: {COLOR_TEXT_SECONDARY};")
+        project_row.addWidget(self._project_label)
+        project_row.addWidget(self._config_label)
+        project_row.addStretch()
+        left.addLayout(project_row)
+        layout.addLayout(left)
 
         layout.addStretch()
 
-        return bar
+        right = QHBoxLayout()
+        right.setSpacing(0)
+        for badge_id, label in [
+            ("halcon", "HALCON"),
+            ("plc", "PLC"),
+            ("cameras", "Cameras"),
+            ("streaming", "Streaming"),
+            ("recording", "Recording"),
+        ]:
+            badge = _ConnectionBadge(label)
+            self._badges[badge_id] = badge
+            right.addWidget(badge)
+        layout.addLayout(right)
 
-    def _build_roi_panel(self) -> QWidget:
+        root.addWidget(header)
 
-        panel = QWidget()
-        panel.setObjectName("roiPanel")
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+    def _build_toolbar(self, root: QVBoxLayout) -> None:
+        bar = QWidget()
+        bar.setStyleSheet(f"background-color: {COLOR_TOOLBAR}; border-bottom: 1px solid {COLOR_BORDER};")
 
-        self._roi_toolbar = ROIToolbar()
-        layout.addWidget(self._roi_toolbar)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(6)
 
-        self._roi_list = ROIListWidget()
-        layout.addWidget(self._roi_list, 1)
+        for text, icon, slot, obj_name in [
+            ("Discover", "\uD83D\uDD0D", self._on_discover, ""),
+            ("Connect", "\uD83D\uDD0C", self._on_connect, "primaryButton"),
+            ("Disconnect", "\u274C", self._on_disconnect, "dangerButton"),
+            ("Refresh", "\uD83D\uDD04", self._on_refresh, ""),
+        ]:
+            btn = QPushButton(f" {icon} {text}")
+            btn.setStyleSheet(STYLE_TOOLBAR_BUTTON)
+            if obj_name:
+                btn.setObjectName(obj_name)
+            btn.clicked.connect(slot)
+            layout.addWidget(btn)
 
-        self._roi_property = ROIPropertyPanel()
-        layout.addWidget(self._roi_property)
+        layout.addStretch()
 
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setStyleSheet(f"color: {COLOR_BORDER};")
+        layout.addWidget(sep)
+        layout.addSpacing(4)
+
+        self._counter_label = QLabel("Discovered: 0  |  Connected: 0 / 8  |  Streaming: 0")
+        self._counter_label.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY}; font-size: 10px; padding: 0 8px;")
+        layout.addWidget(self._counter_label)
+
+        root.addWidget(bar)
+
+    def _build_utilities(self, root: QVBoxLayout) -> None:
+        bar = QWidget()
+        bar.setStyleSheet(f"background-color: {COLOR_BACKGROUND}; border-bottom: 1px solid {COLOR_BORDER};")
+
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(6)
+
+        label = QLabel("Tools")
+        label.setStyleSheet(f"font-size: 10px; font-weight: bold; color: {COLOR_TEXT_SECONDARY}; padding: 0 4px;")
+        layout.addWidget(label)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setStyleSheet(f"color: {COLOR_BORDER};")
+        layout.addWidget(sep)
+        layout.addSpacing(4)
+
+        for text, slot in [
+            ("\u2699\uFE0F Settings", None),
+            ("\uD83D\uDD27 Diagnostics", None),
+            ("\uD83D\uDCCB Logs", None),
+        ]:
+            btn = QPushButton(f" {text}")
+            btn.setStyleSheet(STYLE_TOOLBAR_BUTTON)
+            if slot is not None:
+                btn.clicked.connect(slot)
+            else:
+                btn.setEnabled(False)
+            layout.addWidget(btn)
+
+        layout.addStretch()
+        root.addWidget(bar)
+
+    def _build_content(self) -> QWidget:
+        wrapper = QWidget()
+        content = QVBoxLayout(wrapper)
+        content.setContentsMargins(16, 16, 16, 12)
+        content.setSpacing(12)
+
+        section_header = QHBoxLayout()
+        section_header.setSpacing(8)
+        section_label = QLabel("Camera Management")
+        section_label.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {COLOR_BACKGROUND};")
+        section_header.addWidget(section_label)
+        section_header.addStretch()
+        content.addLayout(section_header)
+
+        self._table = QTableWidget(0, COL_COUNT)
+        self._table.setHorizontalHeaderLabels(HEADERS)
+        self._table.setAlternatingRowColors(True)
+        self._table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._table.setSelectionMode(QTableWidget.SingleSelection)
+        self._table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setShowGrid(True)
+        self._table.setSortingEnabled(True)
+        self._table.itemDoubleClicked.connect(self._on_table_double_click)
+        self._table.verticalHeader().setDefaultSectionSize(40)
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
+        self._table.setColumnWidth(COL_CHECK, 36)
+        self._table.setColumnWidth(COL_STATUS, 28)
+
+        hdr = self._table.horizontalHeader()
+        hdr.setDefaultAlignment(Qt.AlignCenter)
+        hdr.setSectionResizeMode(COL_CHECK, QHeaderView.Fixed)
+        hdr.setSectionResizeMode(COL_STATUS, QHeaderView.Fixed)
+        hdr.setSectionResizeMode(COL_NAME, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(COL_SERIAL, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(COL_IP, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(COL_POSITION, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(COL_MODEL, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(COL_CONNECTED, QHeaderView.ResizeToContents)
+
+        content.addWidget(self._table, 3)
+
+        table_actions = QHBoxLayout()
+        table_actions.setSpacing(8)
+        self._select_all_cb = QCheckBox("Select All")
+        self._select_all_cb.setStyleSheet(f"font-size: 11px; color: {COLOR_SELECTION}; spacing: 6px;")
+        self._select_all_cb.stateChanged.connect(self._on_select_all)
+        table_actions.addWidget(self._select_all_cb)
+
+        self._clear_sel_btn = QPushButton("Clear")
+        self._clear_sel_btn.setStyleSheet(STYLE_TOOLBAR_BUTTON)
+        self._clear_sel_btn.clicked.connect(self._on_clear_selection)
+        table_actions.addWidget(self._clear_sel_btn)
+
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.VLine)
+        sep1.setStyleSheet(f"color: {COLOR_BORDER};")
+        table_actions.addWidget(sep1)
+
+        self._connect_sel_btn = QPushButton("Connect Selected")
+        self._connect_sel_btn.setStyleSheet(STYLE_TOOLBAR_BUTTON)
+        self._connect_sel_btn.setObjectName("primaryButton")
+        self._connect_sel_btn.clicked.connect(self._on_connect_selected)
+        table_actions.addWidget(self._connect_sel_btn)
+
+        self._disconnect_sel_btn = QPushButton("Disconnect Selected")
+        self._disconnect_sel_btn.setStyleSheet(STYLE_TOOLBAR_BUTTON)
+        self._disconnect_sel_btn.setObjectName("dangerButton")
+        self._disconnect_sel_btn.clicked.connect(self._on_disconnect_selected)
+        table_actions.addWidget(self._disconnect_sel_btn)
+
+        table_actions.addStretch()
+        content.addLayout(table_actions)
+
+        self._details_panel = self._build_details_panel()
+        content.addWidget(self._details_panel, 1)
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setStyleSheet(f"color: {COLOR_BORDER};")
+        content.addWidget(sep2)
+
+        nav_label = QLabel("Navigation")
+        nav_label.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {COLOR_BACKGROUND};")
+        content.addWidget(nav_label)
+
+        nav_row = QHBoxLayout()
+        nav_row.setSpacing(16)
+        nav_row.addStretch()
+
+        self._calibration_btn = QPushButton("Calibration")
+        self._calibration_btn.setMinimumSize(180, 42)
+        self._calibration_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {COLOR_ACCENT}; color: white; border: none; border-radius: 4px; padding: 10px 32px; font-size: 13px; font-weight: bold; }} "
+            f"QPushButton:hover {{ background-color: #1565C0; }} "
+            f"QPushButton:disabled {{ background-color: {COLOR_TOOLBAR}; color: {COLOR_TEXT_DISABLED}; }}"
+        )
+        self._calibration_btn.clicked.connect(self._on_calibration)
+
+        self._observation_btn = QPushButton("Observation")
+        self._observation_btn.setMinimumSize(180, 42)
+        self._observation_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {COLOR_PANEL}; color: {COLOR_ACCENT}; border: 2px solid {COLOR_ACCENT}; border-radius: 4px; padding: 10px 32px; font-size: 13px; font-weight: bold; }} "
+            f"QPushButton:hover {{ background-color: {COLOR_SELECTION}; }} "
+            f"QPushButton:disabled {{ background-color: {COLOR_TOOLBAR}; color: {COLOR_TEXT_DISABLED}; border-color: {COLOR_BORDER}; }}"
+        )
+        self._observation_btn.clicked.connect(self._on_observation)
+
+        nav_row.addWidget(self._calibration_btn)
+        nav_row.addWidget(self._observation_btn)
+        nav_row.addStretch()
+        content.addLayout(nav_row)
+
+        return wrapper
+
+    def _build_details_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("panel")
+        panel.setFixedHeight(100)
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(24)
+
+        self._details_placeholder = QLabel("Select a camera to view details")
+        self._details_placeholder.setStyleSheet(f"color: {COLOR_ALARM_GRAY}; font-size: 11px; font-style: italic;")
+        layout.addWidget(self._details_placeholder, 1)
+
+        self._details_grid = QWidget()
+        self._details_grid.hide()
+        grid = QGridLayout(self._details_grid)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(2)
+        grid.setHorizontalSpacing(32)
+
+        fields = [
+            ("Name:", "_details_name", 0, 0),
+            ("Serial:", "_details_serial", 1, 0),
+            ("IP Address:", "_details_ip", 2, 0),
+            ("Model:", "_details_model", 3, 0),
+            ("Position:", "_details_position", 0, 2),
+            ("Firmware:", "_details_firmware", 1, 2),
+            ("Status:", "_details_status", 2, 2),
+            ("FPS:", "_details_fps", 3, 2),
+        ]
+        self._detail_labels = {}
+        for label_text, attr_name, row, col in fields:
+            lbl = QLabel(label_text)
+            lbl.setStyleSheet("QLabel { color: #555555; font-size: 11px; font-weight: bold; }")
+            val = QLabel("--")
+            val.setStyleSheet("QLabel { color: #F4F5F7; font-size: 11px; }")
+            self._detail_labels[attr_name] = val
+            grid.addWidget(lbl, row, col)
+            grid.addWidget(val, row, col + 1)
+
+        layout.addWidget(self._details_grid, 1)
         return panel
 
+    def _build_status_bar(self) -> None:
+        self._status_message = QLabel("Ready")
+        self.statusBar().addWidget(self._status_message)
+        self.statusBar().addPermanentWidget(QLabel("Project: Factory_A"))
+        self.statusBar().addPermanentWidget(QLabel("v2.0"))
+        self._clock_label = QLabel("--:--:--")
+        self._clock_label.setStyleSheet("color: #555555; font-size: 10px; font-weight: bold; border: none;")
+        self.statusBar().addPermanentWidget(self._clock_label)
+
     def _apply_theme(self) -> None:
-
-        self.setStyleSheet(LIGHT_THEME)
-
-    # ---------------------------------------------------------
-    # ROI Signal Wiring
-    # ---------------------------------------------------------
-
-    def _connect_roi_signals(self) -> None:
-
-        signal_bus = self._roi_signal_bus
-        selection = self._roi_selection
-        roi_list = self._roi_list
-        roi_property = self._roi_property
-        toolbar = self._roi_toolbar
-
-        # Toolbar → Signal bus (create/delete/duplicate/save)
-        toolbar.create_roi_requested.connect(
-            signal_bus.create_roi_requested.emit
-        )
-        toolbar.delete_requested.connect(
-            lambda _: signal_bus.delete_requested.emit(
-                selection.selected_id or ""
-            )
-        )
-        toolbar.duplicate_requested.connect(
-            lambda _: signal_bus.duplicate_requested.emit(
-                selection.selected_id or ""
-            )
-        )
-        toolbar.save_requested.connect(
-            signal_bus.save_requested.emit
-        )
-
-        # ROI List → Signal bus
-        roi_list.selection_changed.connect(
-            signal_bus.roi_selected.emit
-        )
-        roi_list.edit_requested.connect(
-            signal_bus.edit_requested.emit
-        )
-        roi_list.delete_requested.connect(
-            signal_bus.delete_requested.emit
-        )
-
-        # Property Panel → Signal bus
-        roi_property.alarm_changed.connect(
-            signal_bus.roi_alarm_changed.emit
-        )
-        roi_property.appearance_changed.connect(
-            signal_bus.roi_appearance_changed.emit
-        )
-        roi_property.recording_changed.connect(
-            signal_bus.roi_recording_changed.emit
-        )
-        roi_property.rename_requested.connect(
-            lambda rid, name: signal_bus.roi_renamed.emit(rid)
-        )
-
-        # Signal bus → Widget updates
-        signal_bus.roi_created.connect(
-            self._on_roi_created
-        )
-        signal_bus.roi_deleted.connect(
-            lambda rid: roi_list.remove_row(rid)
-        )
-        signal_bus.roi_selected.connect(
-            self._on_roi_selected
-        )
-        signal_bus.roi_geometry_changed.connect(
-            self._refresh_roi_list_row
-        )
-        signal_bus.roi_alarm_changed.connect(
-            self._refresh_roi_list_row
-        )
-        signal_bus.roi_appearance_changed.connect(
-            self._refresh_roi_list_row
-        )
-        signal_bus.roi_renamed.connect(
-            self._refresh_roi_list_row
-        )
-        signal_bus.dirty_state_changed.connect(
-            toolbar.set_dirty
-        )
-        signal_bus.roi_statistics_updated.connect(
-            self._on_roi_statistics_updated
-        )
-        signal_bus.roi_alarm_state_changed.connect(
-            self._on_roi_alarm_state_changed
-        )
-
-    def _on_roi_created(self, roi_id: str) -> None:
-        config = self._roi_workspace.get_configuration(roi_id)
-        if config is not None:
-            self._roi_list.add_row(config)
-
-    def _on_roi_selected(self, roi_id: str) -> None:
-        self._roi_list.highlight_row(roi_id)
-        config = self._roi_workspace.get_configuration(roi_id)
-        if config is not None:
-            self._roi_property.load_roi(config)
-
-    def _refresh_roi_list_row(self, roi_id: str) -> None:
-        config = self._roi_workspace.get_configuration(roi_id)
-        if config is not None:
-            self._roi_list.update_row(config)
-
-    def _on_roi_statistics_updated(self, camera_id: str) -> None:
-        if camera_id != self._roi_workspace.active_camera_id:
-            return
-        mgr = self._roi_workspace.get_runtime_manager(camera_id)
-        if mgr is None:
-            return
-        for roi in mgr.get_active():
-            if roi.statistics is None:
-                continue
-            s = roi.statistics
-            temp = s.maximum if s.valid else float("nan")
-            if s.valid:
-                self._roi_list.update_temperature(roi.configuration.roi_id, temp)
-
-    def _on_roi_alarm_state_changed(
-        self, roi_id: str, alarm_result: object
-    ) -> None:
-        from alarm import AlarmResult
-        if not isinstance(alarm_result, AlarmResult):
-            return
-        state_name = alarm_result.state.name if alarm_result.state else ""
-        self._roi_list.update_alarm_state(roi_id, state_name)
-        if self._roi_property.is_current_roi(roi_id):
-            config = self._roi_workspace.get_configuration(roi_id)
-            if config is not None:
-                self._roi_property.load_roi(config)
+        self.setStyleSheet(STYLE_MAIN_WINDOW)
 
     # ---------------------------------------------------------
-    # Camera Registration
+    # Signal Wiring
     # ---------------------------------------------------------
 
-    def add_camera(
-        self,
-        context: CameraContext,
-    ) -> None:
-
-        camera_id = context.camera_id
-
-        if camera_id in self._tiles:
-            return
-
-        self._cameras.append(context)
-
-        tile = CameraTile(
-            camera_id=camera_id,
-            camera_name=f"{camera_id}",
-        )
-        tile.clicked.connect(
-            self._on_tile_clicked
-        )
-
-        self._tiles[camera_id] = tile
-
-        self._rebuild_grid()
-
-        logger.info(
-            f"Camera tile added: {camera_id}"
-        )
-
-    def remove_camera(
-        self,
-        camera_id: str,
-    ) -> None:
-
-        tile = self._tiles.pop(
-            camera_id,
-            None,
-        )
-
-        if tile is None:
-            return
-
-        self._cameras = [
-            c
-            for c in self._cameras
-            if c.camera_id != camera_id
-        ]
-
-        if (
-            self._controller.selected_camera_id
-            == camera_id
-        ):
-            self._controller.select_camera(None)
-            self._control_panel.clear_selection()
-
-        self._rebuild_grid()
+    def _connect_signals(self) -> None:
+        self._menu_discover.triggered.connect(self._on_discover)
+        self._menu_connect.triggered.connect(self._on_connect)
+        self._menu_disconnect.triggered.connect(self._on_disconnect)
+        self._menu_refresh.triggered.connect(self._on_refresh)
+        self._menu_calibration.triggered.connect(self._on_calibration)
+        self._menu_observation.triggered.connect(self._on_observation)
 
     # ---------------------------------------------------------
-    # Grid Layout
+    # Actions
     # ---------------------------------------------------------
 
-    def _rebuild_grid(self) -> None:
+    def _on_discover(self) -> None:
+        self.discover_requested.emit()
+        self._refresh_table()
+        self._update_status("Discovery completed.")
 
-        while self._tile_grid.count():
-            item = self._tile_grid.takeAt(0)
-            if item.widget():
-                item.widget().setParent(None)
+    def _on_connect(self) -> None:
+        try:
+            self._controller.connect_all()
+            self._refresh_table()
+            self._poll_status()
+            self._update_status("All cameras connected.")
+        except Exception as exc:
+            logger.exception("Connect failed")
+            self._update_status(f"Connect failed: {exc}")
 
-        count = len(self._tiles)
+    def _on_disconnect(self) -> None:
+        try:
+            self._controller.disconnect_all()
+            self._refresh_table()
+            self._poll_status()
+            self._update_status("All cameras disconnected.")
+        except Exception as exc:
+            logger.exception("Disconnect failed")
+            self._update_status(f"Disconnect failed: {exc}")
 
-        if count == 0:
+    def _on_refresh(self) -> None:
+        self._refresh_table()
+        self._poll_status()
+        self._update_status("Status refreshed.")
 
-            self._empty_label = QLabel(
-                "No cameras connected."
-            )
-            self._empty_label.setAlignment(
-                Qt.AlignCenter
-            )
-            self._empty_label.setStyleSheet(
-                "color: #999999; font-size: 16px;"
-            )
-            self._tile_grid.addWidget(
-                self._empty_label,
-                0,
-                0,
-            )
-            self._camera_count_label.setText(
-                "Cameras: 0"
-            )
+    def _on_calibration(self) -> None:
+        self.calibration_requested.emit()
+
+    def _on_observation(self) -> None:
+        self.observation_requested.emit()
+
+    def _on_table_double_click(self, item: QTableWidgetItem) -> None:
+        row = item.row()
+        status_item = self._table.item(row, COL_STATUS)
+        if status_item is not None:
+            camera_id = status_item.data(Qt.UserRole)
+            if camera_id:
+                self.camera_detail_requested.emit(camera_id)
+
+    def _on_selection_changed(self) -> None:
+        rows = self._table.selectionModel().selectedRows()
+        if rows:
+            row = rows[0].row()
+            status_item = self._table.item(row, COL_STATUS)
+            if status_item is not None:
+                cid = status_item.data(Qt.UserRole)
+                self._selected_camera_id = cid
+                self._update_details(cid)
+        else:
+            self._selected_camera_id = None
+            self._clear_details()
+        self._update_button_states()
+
+    def _on_select_all(self, state: int) -> None:
+        checked = state == Qt.Checked
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, COL_CHECK)
+            if item is not None:
+                item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+
+    def _on_clear_selection(self) -> None:
+        self._select_all_cb.setCheckState(Qt.Unchecked)
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, COL_CHECK)
+            if item is not None:
+                item.setCheckState(Qt.Unchecked)
+
+    def _on_connect_selected(self) -> None:
+        for cid in self._get_checked_camera_ids():
+            try:
+                self._controller.connect_camera(cid)
+            except Exception as exc:
+                logger.exception(f"Connect failed for {cid}: {exc}")
+        self._refresh_table()
+        self._poll_status()
+        self._update_status("Selected cameras connected.")
+
+    def _on_disconnect_selected(self) -> None:
+        for cid in self._get_checked_camera_ids():
+            try:
+                self._controller.disconnect_camera(cid)
+            except Exception as exc:
+                logger.exception(f"Disconnect failed for {cid}: {exc}")
+        self._refresh_table()
+        self._poll_status()
+        self._update_status("Selected cameras disconnected.")
+
+    def _get_checked_camera_ids(self) -> list[str]:
+        ids = []
+        for row in range(self._table.rowCount()):
+            check_item = self._table.item(row, COL_CHECK)
+            status_item = self._table.item(row, COL_STATUS)
+            if check_item is not None and status_item is not None:
+                if check_item.checkState() == Qt.Checked:
+                    cid = status_item.data(Qt.UserRole)
+                    if cid:
+                        ids.append(cid)
+        return ids
+
+    def _update_status(self, message: str) -> None:
+        self._status_message.setText(message)
+
+    # ---------------------------------------------------------
+    # Camera Table
+    # ---------------------------------------------------------
+
+    def add_camera(self, camera_id: str, name: str, serial: str = "", ip: str = "", model: str = "") -> None:
+        if camera_id in self._camera_rows:
             return
+        self._table.setSortingEnabled(False)
+        row = self._table.rowCount()
+        self._table.insertRow(row)
 
-        cols = self._grid_columns(count)
+        def _make_item(text: str, user_role_data=None) -> QTableWidgetItem:
+            it = QTableWidgetItem(text)
+            if user_role_data is not None:
+                it.setData(Qt.UserRole, user_role_data)
+            return it
 
-        for i, tile in enumerate(
-            self._tiles.values()
-        ):
-            row = i // cols
-            col = i % cols
-            self._tile_grid.addWidget(
-                tile,
-                row,
-                col,
-            )
+        self._table.setItem(row, COL_CHECK, _make_item(""))
+        check_item = self._table.item(row, COL_CHECK)
+        check_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        check_item.setCheckState(Qt.Unchecked)
+        check_item.setTextAlignment(Qt.AlignCenter)
 
-        self._camera_count_label.setText(
-            f"Cameras: {count}"
-        )
+        status_item = _make_item("", camera_id)
+        status_item.setTextAlignment(Qt.AlignCenter)
+        status_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        self._table.setItem(row, COL_STATUS, status_item)
+
+        self._table.setItem(row, COL_NAME, _make_item(name))
+        self._table.setItem(row, COL_SERIAL, _make_item(serial))
+        self._table.setItem(row, COL_IP, _make_item(ip))
+        self._table.setItem(row, COL_POSITION, _make_item("Position 1"))
+        self._table.setItem(row, COL_MODEL, _make_item(model))
+        self._table.setItem(row, COL_CONNECTED, _make_item("Unknown"))
+
+        self._camera_rows[camera_id] = row
+        self._table.setSortingEnabled(True)
+
+    def remove_camera(self, camera_id: str) -> None:
+        row = self._camera_rows.pop(camera_id, None)
+        if row is not None:
+            self._table.removeRow(row)
+            self._rebuild_row_map()
+
+    def update_camera_status(self, camera_id: str, connected: bool) -> None:
+        row = self._camera_rows.get(camera_id)
+        if row is not None:
+            connected_item = self._table.item(row, COL_CONNECTED)
+            if connected_item is not None:
+                connected_item.setText("Connected" if connected else "Disconnected")
+                color = COLOR_ALARM_GREEN if connected else COLOR_ALARM_RED
+                connected_item.setForeground(self._get_color(color))
+
+            status_item = self._table.item(row, COL_STATUS)
+            if status_item is not None:
+                icon = "\u25CF" if connected else "\u25CB"
+                color = COLOR_ALARM_GREEN if connected else COLOR_ALARM_RED
+                status_item.setForeground(self._get_color(color))
+                status_item.setText(icon)
+
+    def _refresh_table(self) -> None:
+        cameras = self._controller.get_all_cameras()
+        seen = set()
+        for context in cameras:
+            cid = context.camera_id
+            seen.add(cid)
+            cm = context.camera_model
+            if cid in self._camera_rows:
+                row = self._camera_rows[cid]
+                for col in [COL_NAME, COL_SERIAL, COL_IP, COL_MODEL]:
+                    item = self._table.item(row, col)
+                    if item is None:
+                        continue
+                    if col == COL_NAME:
+                        item.setText(cm.camera_name)
+                    elif col == COL_SERIAL:
+                        item.setText(cm.serial_number)
+                    elif col == COL_IP:
+                        item.setText(cm.ip_address)
+                    elif col == COL_MODEL:
+                        item.setText(cm.model)
+            else:
+                self.add_camera(cid, cm.camera_name, cm.serial_number, cm.ip_address, cm.model)
+        for cid in list(self._camera_rows.keys()):
+            if cid not in seen:
+                self.remove_camera(cid)
+        if self._selected_camera_id and self._selected_camera_id in self._camera_rows:
+            row = self._camera_rows[self._selected_camera_id]
+            self._table.selectRow(row)
+        self._update_button_states()
+
+    def _rebuild_row_map(self) -> None:
+        self._camera_rows.clear()
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, COL_STATUS)
+            if item is not None:
+                cid = item.data(Qt.UserRole)
+                if cid:
+                    self._camera_rows[cid] = row
 
     @staticmethod
-    def _grid_columns(
-        count: int,
-    ) -> int:
-
-        if count <= 1:
-            return 1
-        if count <= 4:
-            return 2
-        if count <= 6:
-            return 3
-        return 4
+    def _get_color(hex_color: str):
+        from PyQt5.QtGui import QColor
+        return QColor(hex_color)
 
     # ---------------------------------------------------------
-    # Frame Polling
+    # Details Panel
     # ---------------------------------------------------------
 
-    def start_polling(self) -> None:
+    def _update_details(self, camera_id: str) -> None:
+        ctx = self._controller.get_camera(camera_id)
+        self._details_placeholder.hide()
+        self._details_grid.show()
 
-        self._poll_timer.start(
-            self.POLL_INTERVAL_MS
-        )
+        if ctx is None:
+            vals = {k: "--" for k in self._detail_labels}
+        else:
+            cm = ctx.camera_model
+            connected = ctx.is_connected
+            vals = {
+                "_details_name": cm.camera_name,
+                "_details_serial": cm.serial_number,
+                "_details_ip": cm.ip_address,
+                "_details_model": cm.model,
+                "_details_position": "Position 1",
+                "_details_firmware": "--",
+                "_details_status": "Connected" if connected else "Disconnected",
+                "_details_fps": "--",
+            }
+        for key, label in self._detail_labels.items():
+            label.setText(vals.get(key, "--"))
 
-    def stop_polling(self) -> None:
+    def _clear_details(self) -> None:
+        self._details_placeholder.show()
+        self._details_grid.hide()
 
-        self._poll_timer.stop()
+    # ---------------------------------------------------------
+    # Button States
+    # ---------------------------------------------------------
 
-    def _poll_frames(self) -> None:
+    def _update_button_states(self) -> None:
+        connected_count = len(self._controller.connected_cameras())
+        has_connected = connected_count > 0
 
-        for context in self._cameras:
+        self._calibration_btn.setEnabled(has_connected)
+        self._observation_btn.setEnabled(has_connected)
+        self._menu_calibration.setEnabled(has_connected)
+        self._menu_observation.setEnabled(has_connected)
 
-            camera_id = context.camera_id
-            tile = self._tiles.get(camera_id)
+    # ---------------------------------------------------------
+    # Status Polling
+    # ---------------------------------------------------------
 
-            if tile is None:
-                continue
-
-            try:
-
-                raw = context.camera.get_frame()
-
-                if raw is None:
-                    continue
-
-                rgb = self._process_frame(
-                    raw,
-                    context,
-                )
-
-                if rgb is not None:
-
-                    tile.update_frame(
-                        image=rgb,
-                        frame_count=0,
-                        sequence=0,
-                        latency_ms=0.0,
-                        dropped=0,
-                        timeouts=0,
-                        fps=0.0,
-                    )
-
-            except Exception:
-
-                logger.exception(
-                    f"Frame poll failed for {camera_id}"
-                )
-
-        #
-        # Update selected camera info
-        #
-
-        self._update_selected_info()
-
-    def _process_frame(
-        self,
-        raw: np.ndarray,
-        context: CameraContext,
-    ) -> np.ndarray | None:
-
+    def _poll_status(self) -> None:
         try:
+            all_cameras = self._controller.get_all_cameras()
+            connected = self._controller.connected_cameras()
+            running = self._controller.running_cameras()
 
-            cal = context.camera.get_calibration_manager()
+            for cid in list(self._camera_rows.keys()):
+                ctx = self._controller.get_camera(cid)
+                is_connected = ctx is not None and ctx in connected
+                self.update_camera_status(cid, is_connected)
 
-            display = cal.raw_to_display(raw)
+            discovered = len(all_cameras)
+            connected_count = len(connected)
+            streaming_count = len(running)
 
-            rgb = cal.apply_colormap(display)
-
-            temperature = cal.raw_to_temperature(raw)
-            self._roi_workspace.process_frame(
-                camera_id=context.camera_id,
-                temperature_image=temperature,
-                frame_id=0,
+            self._counter_label.setText(
+                f"Discovered: {discovered}  |  Connected: {connected_count} / 8  |  Streaming: {streaming_count}"
             )
 
-            return rgb
+            self._badges["halcon"].set_state("ok")
+            self._badges["plc"].set_state("ok")
+            self._badges["cameras"].set_state(
+                "ok" if connected_count > 0 else "warn",
+                str(connected_count),
+            )
+            self._badges["streaming"].set_state(
+                "ok" if streaming_count > 0 else "warn",
+                str(streaming_count),
+            )
+            self._badges["recording"].set_state("warn", "Idle")
+
+            if hasattr(self, "_details_grid") and self._details_grid.isVisible() and self._selected_camera_id:
+                self._update_details(self._selected_camera_id)
 
         except Exception:
-
-            logger.exception(
-                "Frame processing failed"
-            )
-            return None
+            logger.exception("Status poll failed")
 
     # ---------------------------------------------------------
-    # Tile Selection
+    # Clock
     # ---------------------------------------------------------
 
-    def _on_tile_clicked(
-        self,
-        camera_id: str,
-    ) -> None:
-
-        if self._controller.selected_camera_id == camera_id:
-            return
-
-        for cid, tile in self._tiles.items():
-            tile.set_selected(cid == camera_id)
-
-        try:
-
-            self._controller.select_camera(camera_id)
-
-            focus_dist = (
-                self._controller.get_focus_distance_selected()
-            )
-
-            self._control_panel.show_selection(
-                camera_id=camera_id,
-                focus_distance=focus_dist,
-            )
-
-            self._status_label.setText(
-                f"Selected camera: {camera_id}"
-            )
-
-            # Notify ROI subsystem
-            self._roi_signal_bus.camera_changed.emit(camera_id)
-            acq_state = AcquisitionState(camera_id=camera_id)
-            self._roi_workspace.load_state(acq_state)
-            self._roi_list.rebuild(
-                self._roi_workspace.get_all_configurations()
-            )
-            self._roi_property.clear()
-
-        except Exception:
-
-            logger.exception(
-                f"Failed to select camera {camera_id}"
-            )
-
-            self._control_panel.show_selection(
-                camera_id=camera_id,
-                focus_distance=None,
-            )
-
-    def _update_selected_info(self) -> None:
-
-        selected = self._controller.selected_camera
-
-        if selected is None:
-            return
-
-        try:
-
-            focus_dist = (
-                self._controller.get_focus_distance_selected()
-            )
-
-            self._control_panel.update_focus_distance(
-                focus_dist
-            )
-
-        except Exception:
-            pass
-
-    # ---------------------------------------------------------
-    # Toolbar Actions
-    # ---------------------------------------------------------
-
-    def _on_start_all(self) -> None:
-
-        try:
-
-            self._controller.connect_all()
-            self._controller.start_all()
-
-            self._status_label.setText(
-                "Acquisition started."
-            )
-
-            self.start_polling()
-
-        except Exception as exc:
-
-            logger.exception("Start all failed")
-            self._status_label.setText(
-                f"Start failed: {exc}"
-            )
-
-    def _on_stop_all(self) -> None:
-
-        self.stop_polling()
-
-        try:
-
-            self._controller.stop_all()
-            self._controller.disconnect_all()
-
-            self._status_label.setText(
-                "Acquisition stopped."
-            )
-
-        except Exception as exc:
-
-            logger.exception("Stop all failed")
-            self._status_label.setText(
-                f"Stop failed: {exc}"
-            )
-
-        for tile in self._tiles.values():
-            tile.set_selected(False)
-
-        self._controller.select_camera(None)
-        self._control_panel.clear_selection()
-
-    # ---------------------------------------------------------
-    # NUC
-    # ---------------------------------------------------------
-
-    def _on_nuc_clicked(self) -> None:
-
-        if self._nuc_busy:
-            return
-
-        selected = self._controller.selected_camera
-
-        if selected is None:
-            return
-
-        self._nuc_busy = True
-        self._control_panel.set_nuc_busy(True)
-        self._status_label.setText(
-            f"NUC in progress on {selected.camera_id}..."
-        )
-
-        QApplication.processEvents()
-
-        try:
-
-            self._controller.perform_nuc_selected()
-
-            self._status_label.setText(
-                f"NUC completed on {selected.camera_id}."
-            )
-
-        except Exception as exc:
-
-            logger.exception("NUC failed")
-            self._status_label.setText(
-                f"NUC failed: {exc}"
-            )
-
-        finally:
-
-            self._nuc_busy = False
-            self._control_panel.set_nuc_busy(False)
-
-    # ---------------------------------------------------------
-    # Focus
-    # ---------------------------------------------------------
-
-    def _on_focus_near(self) -> None:
-
-        self._execute_focus("near")
-
-    def _on_focus_far(self) -> None:
-
-        self._execute_focus("far")
-
-    def _execute_focus(
-        self,
-        direction: str,
-    ) -> None:
-
-        if self._focus_busy:
-            return
-
-        selected = self._controller.selected_camera
-
-        if selected is None:
-            return
-
-        self._focus_busy = True
-        self._control_panel.set_focus_busy(True)
-        self._status_label.setText(
-            f"Focus {direction} on {selected.camera_id}..."
-        )
-
-        QApplication.processEvents()
-
-        try:
-
-            if direction == "near":
-
-                requested, actual = (
-                    self._controller.focus_near_selected()
-                )
-
-            else:
-
-                requested, actual = (
-                    self._controller.focus_far_selected()
-                )
-
-            self._control_panel.update_focus_distance(
-                actual
-            )
-
-            self._status_label.setText(
-                f"Focus {direction}: "
-                f"requested={requested:.0f}mm, "
-                f"actual={actual:.0f}mm"
-            )
-
-        except Exception as exc:
-
-            logger.exception(
-                f"Focus {direction} failed"
-            )
-            self._status_label.setText(
-                f"Focus {direction} failed: {exc}"
-            )
-
-        finally:
-
-            self._focus_busy = False
-            self._control_panel.set_focus_busy(False)
+    def _update_clock(self) -> None:
+        self._clock_label.setText(datetime.now().strftime("%H:%M:%S"))
 
     # ---------------------------------------------------------
     # Shutdown
     # ---------------------------------------------------------
 
-    def closeEvent(
-        self,
-        event: QCloseEvent,
-    ) -> None:
-
-        self.stop_polling()
-
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self._poll_timer.stop()
+        self._clock_timer.stop()
         try:
-
             self._controller.shutdown()
-
         except Exception:
-
-            logger.exception(
-                "Shutdown error"
-            )
-
+            logger.exception("Shutdown error")
         event.accept()
-
-    # ---------------------------------------------------------
-    # Show
-    # ---------------------------------------------------------
-
-    def show(self) -> None:
-
-        super().show()
-
-        self.start_polling()

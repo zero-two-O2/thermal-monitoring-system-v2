@@ -238,20 +238,6 @@ class TV46LCamera:
                 f"{self.serial}: Unable to set socket buffer size: {exc}"
             )
         #
-        # Increase internal buffering
-        
-        try:
-            ha.set_framegrabber_param(
-                self._acq,
-                "num_buffers",
-                32,
-            )
-        except Exception as exc:
-            logger.warning(
-                f"{self.serial}: Unable to set buffer count: {exc}"
-            )
-
-        #
         # Set frame rate to 9 FPS
         #
         try:

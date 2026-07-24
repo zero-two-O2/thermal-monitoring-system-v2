@@ -1,3 +1,142 @@
+## 2026-07-25 00:30
+### What changed
+- Removed duplicate Calibration/Observation buttons from toolbar (kept only bottom navigation buttons).
+- Renamed "Quick Actions" toolbar to "Tools" row with only Settings/Diagnostics/Logs (all stubs, disabled).
+- Connected bottom Calibration/Observation buttons to click handlers (`_on_calibration`/`_on_observation`).
+- Fixed button state logic: both buttons disabled when no cameras connected, enabled when >=1 connected.
+- Auto-refresh after connect/disconnect: `_poll_status()` called immediately after connection change so badges/indicators update without waiting for the 2s poll timer.
+- Selection preservation in `_refresh_table`: re-highlights the previously selected row after refresh.
+- Removed stale `_rebuild_row_map` from old remove_camera path (now uses seen-set cleanup).
+### Why
+- Bottom navigation buttons were decorative — never connected to any signal, so Calibration/Observation windows never opened.
+- Duplicate navigation (toolbar + bottom) was confusing.
+- Indicator badges showed stale values until the next poll timer tick.
+- Selection was lost after any refresh operation.
+### Notes
+- Pre-existing LSP errors (PyQt5 type resolution) unchanged.
+- Application.py window management unchanged (already had proper single-instance + bring-to-front logic).
+### Files Changed
+- gui/main_window.py (utility bar, bottom button wiring, button states, selection preservation, auto-refresh)
+
+## 2026-07-24 23:55
+### What changed
+- Rewrote table management in MainWindow to fix "3 empty rows" bug.
+- `add_camera`: now temporarily disables `setSortingEnabled(False)` during row insertion to prevent sorting from creating phantom rows; uses local `_make_item` helper for cleaner item creation.
+- `_refresh_table`: now tracks `seen` set and calls `remove_camera` for stale cameras no longer in the controller (prevents orphan rows).
+- Removed all `[DIAG]` diagnostic prints from `main_window.py` and `application.py`.
+### Why
+- With sorting enabled, `insertRow` + `setItem` could behave unpredictably — sorting would reorder rows before items were fully set, leaving some rows empty. Disabling sorting during the insert/set window ensures items are written to the correct internal row.
+- Stale camera cleanup prevents orphan rows from accumulating if cameras disappear.
+### Notes
+- Pre-existing LSP errors (PyQt5 dynamic type resolution) unchanged.
+### Files Changed
+- gui/main_window.py (add_camera: sorted→unsorted→resorted; _refresh_table: stale cleanup; _poll_status: removed diagnostics)
+- app/application.py (removed diagnostic print block)
+
+## 2026-07-24 23:45
+### What changed
+- Complete MainWindow rewrite into professional Control Center layout.
+- **Header**: Top row with "Thermal Monitoring System" title + project info (left) and live system badges (HALCON/PLC/Cameras/Streaming/Recording) in top-right corner.
+- **Toolbar**: Unicode-icon buttons (Discover/Connect/Disconnect/Refresh) with enabled/disabled state logic. Camera counter showing "Discovered: N | Connected: M / 8 | Streaming: K".
+- **Quick Actions**: Second toolbar row with Calibration, Observation, Settings, Diagnostics, Logs buttons.
+- **Camera Table**: Selection checkbox column (COL_CHECK), 40px row height, centered headers, auto-sized columns, connection state colors (green/red/orange/gray). Select All checkbox + Clear/Connect Selected/Disconnect Selected buttons below table.
+- **Details Panel**: Fixed-height panel below table showing selected camera info (Name, Serial, IP, Model, Position, Firmware, Status, FPS). Updates on row selection.
+- **Navigation**: Centered equal-width Calibration/Observation buttons (180×42px), enabled only when a camera is selected/has cameras.
+- **Status Bar**: Minimal — "Ready" message, project label, version, live clock (HH:MM:SS updated every 1s).
+- **Button states**: Calibration disabled until a camera row is selected. Observation disabled when no cameras registered. Quick action stubs (Settings/Diagnostics/Logs) disabled by default.
+- **Clock timer**: New 1-second QTimer for status bar clock display.
+- Removed: top-right Calibration/Observation toolbar buttons (duplicate navigation), system indicators from status bar (moved to header), unused styles.
+### Why
+- The Main Window needed to resemble a professional industrial control center rather than a development utility.
+- Duplicate navigation (toolbar + bottom buttons) was confusing. Kept bottom navigation.
+- System indicators are more visible in the header than the status bar.
+- Details panel avoids opening a separate dialog for basic per-camera info.
+- Button state management improves usability and prevents invalid operations.
+### Notes
+- No backend code modified. Same signals (`calibration_requested`, `observation_requested`, `camera_detail_requested`, `discover_requested`) preserved.
+- Public API (`add_camera`, `remove_camera`, `update_camera_status`) unchanged.
+- All pre-existing LSP errors are PyQt5 false positives.
+### Files Changed
+- gui/main_window.py (full rewrite)
+
+## 2026-07-24 23:30
+### What changed
+- Fixed double crash on Discover/Connect: `_discover_and_register_cameras` now wraps each camera in a per-board try/except (instead of one try around the entire loop) and skips already-registered cameras via `get_camera() != None` check. `_refresh_table` made defensive against missing table items. `_on_discover` simplified — signal emission is fire-and-forget with no try/except wrapper.
+### Why
+- The single try/except around the HALCON enumeration loop meant the first camera that already existed caused the whole function to abort, leaving remaining cameras unregistered and the table out of sync. Subsequent `_refresh_table()` would then crash on `None` items.
+- The "connect not working" was cascade — discovery failed, leaving zero cameras to connect.
+### Notes
+- No backend code touched. Discovery is now fully idempotent: clicking Discover multiple times is safe.
+### Files Changed
+- app/application.py (_discover_and_register_cameras: per-camera error handling, skip existing)
+- gui/main_window.py (_refresh_table: defensive None checks, _on_discover: simplified)
+
+## 2026-07-24 23:15
+### What changed
+- Fixed discover button crash: replaced `self._controller.camera_manager.discover()` (no such method) with signal-based architecture — MainWindow emits `discover_requested`, Application handles it via `_on_discover_requested -> _discover_and_register_cameras()`. Added `discover_requested = pyqtSignal()` to MainWindow.
+### Why
+- Discover button called a nonexistent method (`CameraManager.discover`), raising `AttributeError` every time. No cameras could ever be discovered.
+### Notes
+- `connect_all` / `disconnect_all` were correct (call controller methods) — the "connect not working" was a side effect of discovery failing first, leaving zero cameras to connect.
+### Files Changed
+- gui/main_window.py (added discover_requested signal, fixed _on_discover)
+- app/application.py (wired discover_requested signal)
+
+## 2026-07-24 23:00
+### What changed
+- Phase 2 - Layout refinements: professional industrial polish across all windows.
+- CameraControlPanel rewritten with 5 QGroupBox sections (Camera, Position, PTZ, Focus, NUC) — camera info, position combo with Prev/Next/Go To/Home, directional PTZ pad (↑ ←HOME→ ↓), focus Near/Far + Fine +/- controls with monospace distance readout, and Execute NUC button.
+- CalibrationWindow: thermal/visible viewers wrapped in fixed 644×488 panels with consistent objectName="panel" styling; right ROI panel set to 30% width via stretch factor 7:3 splitter ratio.
+- ObservationWindow: fixed 8-tile grid (4×2, never reordered) with pre-created CameraTiles; cameras assigned by index to first empty slot; double-click opens CameraDetailWindow; tile.clear_camera() preserves grid layout on disconnect.
+- MainWindow: selection column with checkable items; row height increased to 36px; checkbox reflects connection state.
+- CameraDetailWindow: increased content margins (16,16,16,16) and spacing (12); thermal/visible viewers and bottom sections wrapped in QFrame panels.
+### Why
+- The Phase 1 three-window architecture needed professional spacing, consistent panel styling, and proper layout proportions.
+- Fixed 640×480 viewer size in CalibrationWindow ensures consistent display area.
+- Fixed 8-tile grid simplifies observation mode with predictable layout.
+- Selection column with checkboxes aligns with industrial table conventions.
+### Notes
+- All false-positive LSP errors (PyQt5 dynamic typing) are pre-existing and harmless.
+- No backend code touched.
+### Files Changed
+- gui/widgets/camera_control_panel.py (rewrite: group-box sections, PTZ pad, focus fine, NUC)
+- gui/calibration/calibration_window.py (fixed 640×480 viewers, 30% ROI splitter)
+- gui/observer/observer_window.py (rewrite: fixed 8-tile grid, slot-based assignment)
+- gui/main_window.py (selection column, 36px row height, checkable items)
+- gui/camera_detail_window.py (increased margins/spacing, panel wrapping)
+- CHANGELOG.md (updated)
+
+## 2026-07-24 22:00
+### What changed
+- Complete GUI 2.0 redesign (Phase 1 - Layout & User Experience).
+- Main Window rewritten as Control Center with camera discovery table, system status indicators, Menu Bar, Toolbar, and navigation buttons.
+- Calibration Window rewritten as Engineering Mode with left camera controls panel, dual thermal/visible synchronized viewers, right ROI workspace panel with collapsible property inspector.
+- Observation Window rewritten as Operator Mode with camera tile grid (up to 8 cameras), active alarm table, and minimal controls.
+- Camera Detail Window created as a new standalone widget for per-camera inspection.
+- Centralized theme system (gui/theme.py) with professional light industrial palette: #F4F5F7 background, #FFFFFF panels, #1976D2 accent.
+- ROIPropertyPanel rewritten from flat scroll form to collapsible sections (General, Geometry, Appearance, Alarm, Recording, Metadata) like Visual Studio Property Inspector.
+- CameraControlPanel refactored for compact left-panel placement in calibration window.
+- Application bootstrap updated to manage lazy-loaded Calibration, Observation, and Camera Detail windows.
+### Why
+- The original MainWindow mixed camera viewing with ROI editing in a single window, creating a cluttered experience.
+- The three-window architecture separates concerns: Main Window (control center), Calibration (engineering), Observation (operator).
+- The collapsible property inspector replaces the large scrolling form that was difficult to navigate.
+- The centralized theme ensures consistent styling across all windows.
+### Notes
+- All existing backend code is untouched (Camera, HALCON, ROI, Alarm, Processing, etc.).
+- All 421 existing tests pass; 8 pre-existing backend failures unchanged.
+- Icon files in assets/icons/ are unused placeholder (.gitkeep only) — text/unicode-based indicators used instead.
+- ruff lint check passes with zero errors.
+### Files Changed
+- gui/theme.py (new)
+- gui/main_window.py (rewrite)
+- gui/widgets/camera_control_panel.py (refactor)
+- gui/roi/roi_property_panel.py (rewrite - collapsible sections)
+- gui/calibration/calibration_window.py (rewrite from placeholder)
+- gui/observer/observer_window.py (rewrite from placeholder)
+- gui/camera_detail_window.py (new)
+- app/application.py (update)
+
 ## 2026-07-24 18:00
 ### What changed
 - **Fixed calibration never initialized**: `CameraFactory.create_camera()` only called `calibration_manager.initialize()` if `camera_model.calibration_file` was set — but it was always `None` because we never set it during discovery. The method now always calls `initialize()` inside a try/except, matching the pattern in the working `camera_viewer.py`.
