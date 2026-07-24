@@ -1,6 +1,29 @@
 ## 2026-07-24
 ### What changed
-- **New standalone tool**: `tests/halcon_parameter_explorer.py` — HALCON Parameter Explorer for experimenting with TV46L framegrabber parameters without touching production code.
+- **ROI Subsystem Phase 1 (Foundation — revision 2)**: Addressed review feedback across all modules.
+- **`roi/acquisition_state.py`** (new): `AcquisitionState` dataclass (camera_id, pan, tilt, zoom, focus) replaces raw `position_id` in ROIConfiguration. Frozen, hashable. Future-proof for multi-axis acquisition.
+- **`roi/geometry.py`** (rewrite): `ROIGeometry` is now a proper ABC with abstract `shape`, `validate()`, `bounding_box()`. All five concrete types implement self-validation (raise ValueError on invalid params) and compute axis-aligned bounding boxes. `PolygonROI` now stores `points: tuple[tuple[float, float], ...]` instead of separate rows/cols.
+- **`roi/runtime_cache.py`** (new): `RuntimeROICache` — isolates HALCON HRegion storage from `RuntimeROI`. Holds region, area, bounding_box, dirty flag, last_generation. Prevents HALCON types from leaking into the generic model. Future cache additions (reduced image, contour, mask) add here without touching RuntimeROI.
+- **`roi/runtime.py`** (rewrite): `RuntimeROIStatistics` now includes `valid`, `processing_time_ms`, `frame_id`, `alarm_active`, `alarm_since`, `last_updated`. `RuntimeROI` replaces raw `_cached_region` field with `cache: RuntimeROICache` for clean separation of concerns.
+- **`roi/configuration.py`** (rewrite): Uses `AcquisitionState` instead of `position_id`. Added explicit boundary documentation: lists what must never be added (cached_region, statistics, drawing_object, runtime_state, etc.).
+- **`roi/geometry_to_hregion.py`** (new): Dedicated conversion layer — one responsibility: `ROIGeometry → HRegion`. Each shape type has its own private `_gen_*` function. HALCON import confined to this module. Raises `NotImplementedError` until HALCON is available.
+- **`roi/interfaces.py`** (rewrite): `ROIManager.load/unload_position` → `load/unload_state(acquisition_state)`. `RuntimeROIManager` now includes `get_active()`, `mark_dirty()`, `rebuild_dirty_regions()`, `refresh_statistics()`. `ROIRepository.load_all()` takes `AcquisitionState`.
+- **`roi/__init__.py`**: Updated exports for new modules (AcquisitionState, RuntimeROICache, geometry_to_hregion, BoundingBox).
+### Why
+- Position ID alone is insufficient for systems where zoom/focus/lens affect ROI validity.
+- Self-validating geometry prevents invalid data from entering the system at the boundary.
+- Tuple of (row,col) pairs eliminates row/col length mismatch bugs and simplifies iteration/serialization.
+- HALCON HRegion storage needs a dedicated container so RuntimeROI doesn't leak HALCON types.
+- Runtime statistics were missing fields that other parts of the system will need (frame_id, timing, alarm state).
+- A dedicated conversion layer keeps HALCON code isolated, following project convention.
+- Missing interface methods (get_active, mark_dirty, rebuild_dirty, refresh_statistics) would force downstream code to work around the gaps.
+### Notes
+- 12 files now in `roi/` (3 new, 6 rewritten, 3 unchanged).
+- Full runtime verification passes: geometry validation, bounding boxes, polygon storage, AcquisitionState equality, RuntimeROI/Cache integration.
+- All geometry types are frozen dataclasses with slots. Lint (ruff) passes cleanly.
+- Geometry classes are frozen (immutable) dataclasses with slots.
+- RuntimeROI declares `_cached_region: object` as placeholder for future HALCON HRegion.
+- Lint (ruff) passes cleanly. All imports verified at runtime.
 - Parameter Browser with three categories: Read Only, Read/Write, Write Only (auto-discovered via HALCON APIs + known registry).
 - Manual Test Box with Read/Write/Execute for ad-hoc parameter testing.
 - Quick Test mode — set `TEST_PARAMETER` constant at the top to auto-test any single parameter on startup.
