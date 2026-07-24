@@ -1,3 +1,47 @@
+## 2026-07-25 02:00
+### What changed
+- Created Settings window (`gui/settings_window.py`): QListWidget navigation (10 categories) + QStackedWidget pages. Categories: General, Appearance, Project, Cameras, ROI Defaults, Alarm Defaults, Recording, Logging, Network, Advanced. Each page has realistic placeholder controls (combos, spinboxes, checkboxes, line edits). Apply button per page.
+- Created Diagnostics window (`gui/diagnostics_window.py`): System group (Python/Qt/HALCON version + platform info), Camera Diagnostics table (7-col table with name/connection/FPS/latency/age/dropped/status, polled every 2s from controller), Recent Log Output area. Uses `ApplicationController` for live camera data.
+- Created Event Log window (`gui/log_window.py`): `LogWindow` singleton with `LogWindow.log(message, severity, source)` class method for global access. Toolbar with search input, severity filter (All/INFO/WARNING/ERROR), Auto Scroll checkbox, Clear, Export to CSV. Table columns: Timestamp, Severity (color-coded), Source, Message. Max 10k entries.
+- Removed "Tools" label + separator from utilities toolbar — now just Settings/Diagnostics/Logs buttons directly.
+- Added Event Log entry in View menu.
+- Wired all 3 buttons in MainWindow (`_on_settings`, `_on_diagnostics`, `_on_logs`): lazy instance creation, single-instance enforcement, bring-to-front, cleanup on close.
+- Added logging integration to all GUI actions: Application Start, Discover, Connect, Disconnect, Refresh, Connect Selected, Disconnect Selected, Open Calibration, Open Observation, Open Settings, Open Diagnostics, Open Logs. Errors logged as ERROR severity.
+- Added `shutdown_utility_windows()` method to MainWindow, called from `closeEvent` and from Application.shutdown.
+### Why
+- The Settings, Diagnostics, and Logs buttons were disabled stubs — no actual windows existed.
+- Event logging is essential for commissioning and debugging. The `LogWindow.log()` class method allows future integration with Camera Manager, Alarm Engine, ROI Manager, etc. without redesign.
+- The singleton pattern on LogWindow ensures one-instance and global accessibility.
+### Notes
+- Pre-existing LSP errors (PyQt5 type resolution) unchanged.
+- No backend code modified. No HALCON, camera manager, ROI, alarm, persistence, or processing pipeline changes.
+- Settings window is structural — most controls are placeholders with TODO comments for QSettings integration.
+- Diagnostics window uses live controller data but FPS/latency/age/dropped columns show "N/A" until per-camera frame metrics are exposed.
+### Files Changed
+- gui/settings_window.py (new)
+- gui/diagnostics_window.py (new)
+- gui/log_window.py (new)
+- gui/main_window.py (utilities bar, window management, logging, menu entry)
+- app/application.py (shutdown integration)
+
+## 2026-07-25 01:00
+### What changed
+- Fixed invisible text bugs in Main Window: section label color `COLOR_BACKGROUND` → `COLOR_TEXT_PRIMARY`, detail value color `#F4F5F7` → `COLOR_TEXT_PRIMARY`, checkbox color `COLOR_SELECTION` → `COLOR_TEXT_PRIMARY`, clock/field label colors use theme constants.
+- Wrapped Camera Management section (table + actions bar) in a white card (`QFrame#panel`) with rounded border.
+- Wrapped Navigation section in a white card (`QFrame#panel`) — no more isolated buttons on background.
+- Details panel already had `objectName="panel"` — confirmed properly styled as white card.
+- Removed horizontal separator (`sep2`) between details and navigation (cards provide their own visual separation via borders + spacing).
+- No hardcoded `black` or `#000000` values remain in main_window.py.
+### Why
+- Section labels were invisible (white-on-light-gray) due to wrong color constant usage.
+- Widgets placed directly on window background created large dark areas when theme was applied.
+- Card-based layout gives professional appearance with consistent white-on-light-gray hierarchy.
+### Notes
+- Pre-existing LSP errors (PyQt5 type resolution) unchanged.
+- No backend code, no functional logic, no signal wiring changed.
+### Files Changed
+- gui/main_window.py (card wrapping, color constant fixes, hardcoded hex removal)
+
 ## 2026-07-25 00:30
 ### What changed
 - Removed duplicate Calibration/Observation buttons from toolbar (kept only bottom navigation buttons).

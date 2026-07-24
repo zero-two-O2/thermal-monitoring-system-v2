@@ -257,6 +257,11 @@ class Application:
             except RuntimeError:
                 pass
         self._camera_detail_windows.clear()
+        if self._window is not None:
+            try:
+                self._window.shutdown_utility_windows()
+            except Exception:
+                pass
         self._controller.shutdown()
 
     # ---------------------------------------------------------

@@ -121,6 +121,10 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._update_button_states()
 
+        self._settings_window = None
+        self._diagnostics_window = None
+        self._log_window = None
+
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_status)
         self._poll_timer.start(self.POLL_INTERVAL_MS)
@@ -129,6 +133,8 @@ class MainWindow(QMainWindow):
         self._clock_timer.timeout.connect(self._update_clock)
         self._clock_timer.start(self.CLOCK_INTERVAL_MS)
         self._update_clock()
+
+        self._log_event("Application started", "INFO", "GUI")
 
     # ---------------------------------------------------------
     # Menu Bar
@@ -167,6 +173,10 @@ class MainWindow(QMainWindow):
         self._menu_observation = QAction("Observation Window", self)
         view_menu.addAction(self._menu_calibration)
         view_menu.addAction(self._menu_observation)
+        view_menu.addSeparator()
+        self._menu_log = QAction("Event Log", self)
+        self._menu_log.triggered.connect(self._on_logs)
+        view_menu.addAction(self._menu_log)
 
         help_menu = menu_bar.addMenu("Help")
         about_action = QAction("About", self)
@@ -279,27 +289,14 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(12, 6, 12, 6)
         layout.setSpacing(6)
 
-        label = QLabel("Tools")
-        label.setStyleSheet(f"font-size: 10px; font-weight: bold; color: {COLOR_TEXT_SECONDARY}; padding: 0 4px;")
-        layout.addWidget(label)
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.VLine)
-        sep.setStyleSheet(f"color: {COLOR_BORDER};")
-        layout.addWidget(sep)
-        layout.addSpacing(4)
-
         for text, slot in [
-            ("\u2699\uFE0F Settings", None),
-            ("\uD83D\uDD27 Diagnostics", None),
-            ("\uD83D\uDCCB Logs", None),
+            ("\u2699\uFE0F Settings", self._on_settings),
+            ("\uD83D\uDD27 Diagnostics", self._on_diagnostics),
+            ("\uD83D\uDCCB Logs", self._on_logs),
         ]:
             btn = QPushButton(f" {text}")
             btn.setStyleSheet(STYLE_TOOLBAR_BUTTON)
-            if slot is not None:
-                btn.clicked.connect(slot)
-            else:
-                btn.setEnabled(False)
+            btn.clicked.connect(slot)
             layout.addWidget(btn)
 
         layout.addStretch()
@@ -308,16 +305,19 @@ class MainWindow(QMainWindow):
     def _build_content(self) -> QWidget:
         wrapper = QWidget()
         content = QVBoxLayout(wrapper)
-        content.setContentsMargins(16, 16, 16, 12)
+        content.setContentsMargins(16, 12, 16, 12)
         content.setSpacing(12)
 
-        section_header = QHBoxLayout()
-        section_header.setSpacing(8)
+        # ── Camera Management Card ──
         section_label = QLabel("Camera Management")
-        section_label.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {COLOR_BACKGROUND};")
-        section_header.addWidget(section_label)
-        section_header.addStretch()
-        content.addLayout(section_header)
+        section_label.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {COLOR_TEXT_PRIMARY};")
+        content.addWidget(section_label)
+
+        camera_card = QFrame()
+        camera_card.setObjectName("panel")
+        card_layout = QVBoxLayout(camera_card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
 
         self._table = QTableWidget(0, COL_COUNT)
         self._table.setHorizontalHeaderLabels(HEADERS)
@@ -345,51 +345,65 @@ class MainWindow(QMainWindow):
         hdr.setSectionResizeMode(COL_MODEL, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(COL_CONNECTED, QHeaderView.ResizeToContents)
 
-        content.addWidget(self._table, 3)
+        card_layout.addWidget(self._table, 1)
 
-        table_actions = QHBoxLayout()
-        table_actions.setSpacing(8)
+        actions_bg = QWidget()
+        actions_bg.setStyleSheet(
+            f"background-color: {COLOR_PANEL}; "
+            f"border-top: 1px solid {COLOR_BORDER}; "
+            f"border-bottom-left-radius: 2px; "
+            f"border-bottom-right-radius: 2px;"
+        )
+        actions_row = QHBoxLayout(actions_bg)
+        actions_row.setContentsMargins(8, 6, 8, 6)
+        actions_row.setSpacing(8)
+
         self._select_all_cb = QCheckBox("Select All")
-        self._select_all_cb.setStyleSheet(f"font-size: 11px; color: {COLOR_SELECTION}; spacing: 6px;")
+        self._select_all_cb.setStyleSheet(f"font-size: 11px; color: {COLOR_TEXT_PRIMARY}; spacing: 6px;")
         self._select_all_cb.stateChanged.connect(self._on_select_all)
-        table_actions.addWidget(self._select_all_cb)
+        actions_row.addWidget(self._select_all_cb)
 
         self._clear_sel_btn = QPushButton("Clear")
         self._clear_sel_btn.setStyleSheet(STYLE_TOOLBAR_BUTTON)
         self._clear_sel_btn.clicked.connect(self._on_clear_selection)
-        table_actions.addWidget(self._clear_sel_btn)
+        actions_row.addWidget(self._clear_sel_btn)
 
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.VLine)
         sep1.setStyleSheet(f"color: {COLOR_BORDER};")
-        table_actions.addWidget(sep1)
+        actions_row.addWidget(sep1)
 
         self._connect_sel_btn = QPushButton("Connect Selected")
         self._connect_sel_btn.setStyleSheet(STYLE_TOOLBAR_BUTTON)
         self._connect_sel_btn.setObjectName("primaryButton")
         self._connect_sel_btn.clicked.connect(self._on_connect_selected)
-        table_actions.addWidget(self._connect_sel_btn)
+        actions_row.addWidget(self._connect_sel_btn)
 
         self._disconnect_sel_btn = QPushButton("Disconnect Selected")
         self._disconnect_sel_btn.setStyleSheet(STYLE_TOOLBAR_BUTTON)
         self._disconnect_sel_btn.setObjectName("dangerButton")
         self._disconnect_sel_btn.clicked.connect(self._on_disconnect_selected)
-        table_actions.addWidget(self._disconnect_sel_btn)
+        actions_row.addWidget(self._disconnect_sel_btn)
 
-        table_actions.addStretch()
-        content.addLayout(table_actions)
+        actions_row.addStretch()
+        card_layout.addWidget(actions_bg)
 
+        content.addWidget(camera_card, 3)
+
+        # ── Details Card ──
         self._details_panel = self._build_details_panel()
-        content.addWidget(self._details_panel, 1)
+        content.addWidget(self._details_panel)
 
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.HLine)
-        sep2.setStyleSheet(f"color: {COLOR_BORDER};")
-        content.addWidget(sep2)
+        # ── Navigation Card ──
+        nav_card = QFrame()
+        nav_card.setObjectName("panel")
+        nav_layout = QVBoxLayout(nav_card)
+        nav_layout.setContentsMargins(16, 12, 16, 12)
+        nav_layout.setSpacing(10)
 
         nav_label = QLabel("Navigation")
-        nav_label.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {COLOR_BACKGROUND};")
-        content.addWidget(nav_label)
+        nav_label.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {COLOR_TEXT_PRIMARY};")
+        nav_layout.addWidget(nav_label)
 
         nav_row = QHBoxLayout()
         nav_row.setSpacing(16)
@@ -416,7 +430,9 @@ class MainWindow(QMainWindow):
         nav_row.addWidget(self._calibration_btn)
         nav_row.addWidget(self._observation_btn)
         nav_row.addStretch()
-        content.addLayout(nav_row)
+        nav_layout.addLayout(nav_row)
+
+        content.addWidget(nav_card)
 
         return wrapper
 
@@ -452,9 +468,9 @@ class MainWindow(QMainWindow):
         self._detail_labels = {}
         for label_text, attr_name, row, col in fields:
             lbl = QLabel(label_text)
-            lbl.setStyleSheet("QLabel { color: #555555; font-size: 11px; font-weight: bold; }")
+            lbl.setStyleSheet(f"QLabel {{ color: {COLOR_TEXT_SECONDARY}; font-size: 11px; font-weight: bold; }}")
             val = QLabel("--")
-            val.setStyleSheet("QLabel { color: #F4F5F7; font-size: 11px; }")
+            val.setStyleSheet(f"QLabel {{ color: {COLOR_TEXT_PRIMARY}; font-size: 11px; }}")
             self._detail_labels[attr_name] = val
             grid.addWidget(lbl, row, col)
             grid.addWidget(val, row, col + 1)
@@ -468,7 +484,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(QLabel("Project: Factory_A"))
         self.statusBar().addPermanentWidget(QLabel("v2.0"))
         self._clock_label = QLabel("--:--:--")
-        self._clock_label.setStyleSheet("color: #555555; font-size: 10px; font-weight: bold; border: none;")
+        self._clock_label.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY}; font-size: 10px; font-weight: bold; border: none;")
         self.statusBar().addPermanentWidget(self._clock_label)
 
     def _apply_theme(self) -> None:
@@ -491,6 +507,7 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------
 
     def _on_discover(self) -> None:
+        self._log_event("Discovering cameras...", "INFO", "GUI")
         self.discover_requested.emit()
         self._refresh_table()
         self._update_status("Discovery completed.")
@@ -501,9 +518,11 @@ class MainWindow(QMainWindow):
             self._refresh_table()
             self._poll_status()
             self._update_status("All cameras connected.")
+            self._log_event("All cameras connected", "INFO", "GUI")
         except Exception as exc:
             logger.exception("Connect failed")
             self._update_status(f"Connect failed: {exc}")
+            self._log_event(f"Connect failed: {exc}", "ERROR", "GUI")
 
     def _on_disconnect(self) -> None:
         try:
@@ -511,20 +530,70 @@ class MainWindow(QMainWindow):
             self._refresh_table()
             self._poll_status()
             self._update_status("All cameras disconnected.")
+            self._log_event("All cameras disconnected", "INFO", "GUI")
         except Exception as exc:
             logger.exception("Disconnect failed")
             self._update_status(f"Disconnect failed: {exc}")
+            self._log_event(f"Disconnect failed: {exc}", "ERROR", "GUI")
 
     def _on_refresh(self) -> None:
         self._refresh_table()
         self._poll_status()
         self._update_status("Status refreshed.")
+        self._log_event("Status refreshed", "INFO", "GUI")
 
     def _on_calibration(self) -> None:
         self.calibration_requested.emit()
+        self._log_event("Opened Calibration window", "INFO", "GUI")
 
     def _on_observation(self) -> None:
         self.observation_requested.emit()
+        self._log_event("Opened Observation window", "INFO", "GUI")
+
+    def _on_settings(self) -> None:
+        if self._settings_window is None:
+            from gui.settings_window import SettingsWindow
+            self._settings_window = SettingsWindow()
+            self._settings_window.destroyed.connect(self._on_settings_closed)
+        self._settings_window.show()
+        self._settings_window.raise_()
+        self._settings_window.activateWindow()
+        self._log_event("Opened Settings window", "INFO", "GUI")
+
+    def _on_settings_closed(self) -> None:
+        self._settings_window = None
+
+    def _on_diagnostics(self) -> None:
+        if self._diagnostics_window is None:
+            from gui.diagnostics_window import DiagnosticsWindow
+            self._diagnostics_window = DiagnosticsWindow(self._controller)
+            self._diagnostics_window.destroyed.connect(self._on_diagnostics_closed)
+        self._diagnostics_window.show()
+        self._diagnostics_window.raise_()
+        self._diagnostics_window.activateWindow()
+        self._log_event("Opened Diagnostics window", "INFO", "GUI")
+
+    def _on_diagnostics_closed(self) -> None:
+        if self._diagnostics_window is not None:
+            self._diagnostics_window.stop()
+        self._diagnostics_window = None
+
+    def _on_logs(self) -> None:
+        if self._log_window is None:
+            from gui.log_window import LogWindow
+            self._log_window = LogWindow()
+            self._log_window.destroyed.connect(self._on_logs_closed)
+        self._log_window.show()
+        self._log_window.raise_()
+        self._log_window.activateWindow()
+        self._log_event("Opened Event Log window", "INFO", "GUI")
+
+    def _on_logs_closed(self) -> None:
+        self._log_window = None
+
+    def _log_event(self, message: str, severity: str = "INFO", source: str = "GUI") -> None:
+        from gui.log_window import LogWindow
+        LogWindow.log(message, severity, source)
 
     def _on_table_double_click(self, item: QTableWidgetItem) -> None:
         row = item.row()
@@ -563,21 +632,27 @@ class MainWindow(QMainWindow):
                 item.setCheckState(Qt.Unchecked)
 
     def _on_connect_selected(self) -> None:
-        for cid in self._get_checked_camera_ids():
+        ids = self._get_checked_camera_ids()
+        for cid in ids:
             try:
                 self._controller.connect_camera(cid)
+                self._log_event(f"Camera {cid} connected", "INFO", "GUI")
             except Exception as exc:
                 logger.exception(f"Connect failed for {cid}: {exc}")
+                self._log_event(f"Connect failed for {cid}: {exc}", "ERROR", "GUI")
         self._refresh_table()
         self._poll_status()
         self._update_status("Selected cameras connected.")
 
     def _on_disconnect_selected(self) -> None:
-        for cid in self._get_checked_camera_ids():
+        ids = self._get_checked_camera_ids()
+        for cid in ids:
             try:
                 self._controller.disconnect_camera(cid)
+                self._log_event(f"Camera {cid} disconnected", "INFO", "GUI")
             except Exception as exc:
                 logger.exception(f"Disconnect failed for {cid}: {exc}")
+                self._log_event(f"Disconnect failed for {cid}: {exc}", "ERROR", "GUI")
         self._refresh_table()
         self._poll_status()
         self._update_status("Selected cameras disconnected.")
@@ -798,9 +873,22 @@ class MainWindow(QMainWindow):
     # Shutdown
     # ---------------------------------------------------------
 
+    def shutdown_utility_windows(self) -> None:
+        if self._settings_window is not None:
+            self._settings_window.close()
+            self._settings_window = None
+        if self._diagnostics_window is not None:
+            self._diagnostics_window.stop()
+            self._diagnostics_window.close()
+            self._diagnostics_window = None
+        if self._log_window is not None:
+            self._log_window.close()
+            self._log_window = None
+
     def closeEvent(self, event: QCloseEvent) -> None:
         self._poll_timer.stop()
         self._clock_timer.stop()
+        self.shutdown_utility_windows()
         try:
             self._controller.shutdown()
         except Exception:
