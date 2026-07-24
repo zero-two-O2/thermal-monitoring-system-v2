@@ -15,7 +15,6 @@ All operations delegate to the existing TV46LCamera APIs.
 from __future__ import annotations
 
 from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QFrame
 from PyQt5.QtWidgets import QHBoxLayout
 from PyQt5.QtWidgets import QLabel

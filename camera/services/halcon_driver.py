@@ -20,6 +20,7 @@ import time
 from typing import Any
 
 import halcon as ha
+import numpy as np
 
 from camera.models.camera_model import CameraModel
 
@@ -80,7 +81,7 @@ class HalconDriver:
                 0,
                 0,
 
-                "default",
+                "progressive",
 
                 -1,
 
@@ -90,7 +91,9 @@ class HalconDriver:
 
                 "false",
 
-                self.camera.ip_address,
+                "default",
+
+                self.camera.device_identifier,
 
                 0,
 
@@ -105,6 +108,11 @@ class HalconDriver:
             )
 
             self._configure_camera()
+
+            ha.grab_image_start(
+                self._framegrabber,
+                -1,
+            )
 
         except Exception:
 
@@ -161,10 +169,58 @@ class HalconDriver:
             16,
         )
 
-        #
-        # Additional parameters can be added
-        # here as required.
-        #
+        try:
+            self.set_parameter(
+                "[Stream]DeviceStreamChannelNegotiatePacketSize",
+                1,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Unable to negotiate packet size: {exc}"
+            )
+
+        try:
+            self.set_parameter(
+                "[Stream]GevStreamReceiveSocketSize",
+                1048576,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Unable to set socket buffer size: {exc}"
+            )
+
+        try:
+            self.set_parameter(
+                "num_buffers",
+                32,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Unable to set buffer count: {exc}"
+            )
+
+        try:
+            self.set_parameter(
+                "FLK_TI_ControlFeature_SetFrameRate",
+                9,
+            )
+        except Exception:
+            logger.warning(
+                "Unable to set frame rate."
+            )
+
+        try:
+            self.set_parameter(
+                "FLK_TI_ControlFeature_REControlCmd",
+                (
+                    "FLK_TI_ControlFeature_"
+                    "REControlCmd_DisableAutomaticFineOffsets"
+                ),
+            )
+        except Exception:
+            logger.warning(
+                "Unable to disable automatic NUC."
+            )
 
         logger.info(
             "Camera configuration complete."
@@ -216,6 +272,38 @@ class HalconDriver:
     def is_connected(self) -> bool:
 
         return self._connected
+
+    # ==========================================================
+    # Frame Grabbing
+    # ==========================================================
+
+    def grab_frame(
+        self,
+    ) -> np.ndarray | None:
+        """
+        Grab a single frame from the camera.
+
+        Returns a 16-bit numpy array or None on timeout.
+        """
+
+        try:
+
+            image = ha.grab_image_async(
+                self._framegrabber,
+                200,
+            )
+
+            return ha.himage_as_numpy_array(
+                image
+            )
+
+        except Exception:
+
+            logger.exception(
+                "Frame grab failed."
+            )
+
+            return None
 
     # ==========================================================
     # NUC

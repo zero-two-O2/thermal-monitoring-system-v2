@@ -13,14 +13,8 @@ import sys
 import time
 import traceback
 from pathlib import Path
-
-import cv2
 import numpy as np
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import traceback
-import time
-import numpy as np
 from calibration.calibration_manager import CalibrationManager
 from processing.pipeline.processing_pipeline import ProcessingPipeline
 from processing.roi_processor import ROIProcessor

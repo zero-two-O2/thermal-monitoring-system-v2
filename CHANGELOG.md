@@ -1,3 +1,68 @@
+## 2026-07-24 18:00
+### What changed
+- **Fixed calibration never initialized**: `CameraFactory.create_camera()` only called `calibration_manager.initialize()` if `camera_model.calibration_file` was set — but it was always `None` because we never set it during discovery. The method now always calls `initialize()` inside a try/except, matching the pattern in the working `camera_viewer.py`.
+### Why
+- Without initialization, the lookup table (LUT) was never built. `raw_to_display()` raised `RuntimeError("Lookup table has not been generated.")` on every frame, which was silently caught by `_process_frame()`, resulting in blank camera tiles.
+### Notes
+- `CalibrationManager.initialize()` takes no arguments (reads `settings.CALIBRATION_FILE` internally), but the old factory code passed `camera_model.calibration_file` — that would have caused `TypeError` if the guard were ever True.
+### Files Changed
+- camera/factory/camera_factory.py
+
+## 2026-07-24 18:30
+### What changed
+- **Complete camera pipeline parity audit**: Compared old working implementation (commit 0f3fb5b `tv46l_camera.py`, `previous_camera_connection/live_camera.py`) against new architecture (`HalconDriver` + `AcquisitionEngine` + `CameraFactory` + `Application`). Fixed two critical `open_framegrabber()` parameter mismatches.
+### Why
+- The previous registration + calibration fixes were insufficient — cameras were detected (discovery worked) but no feed appeared due to silent `open_framegrabber()` failure.
+### Notes
+- **FieldType**: old code uses `"progressive"` (position 8), new code used `"default"`.
+- **Device**: old code passes device identifier string (e.g. `"2c19:0001a6e0xxxx"`), new code was passing IP address. HALCON expects the device identifier from `info_framegrabber()` output for GigE Vision.
+- `for_each_camera()` wrapper catches all exceptions silently, so connection failure is logged but invisible in GUI.
+- Pre-existing LSP type errors (`HHandle|None`) are harmless.
+### Files Changed
+- camera/services/halcon_driver.py (open_framegrabber FieldType + Device params)
+
+## 2026-07-24 17:30
+### What changed
+- **Fixed camera discovery + registration bootstrap**: Added HALCON-based `ha.info_framegrabber()` discovery to `Application.initialize()`. Discovered cameras are now registered with `CameraManager` and `MainWindow` via `CameraFactory`.
+- **Fixed `HalconDriver.open_framegrabber()` parameter order**: IP address was passed as CameraType (param 13) instead of Device (param 14). Changed `CameraType` to `"default"`, `Device` to IP address, added missing `LineIn=-1`.
+### Why
+- Application never discovered cameras: `CameraDiscovery.discover()` was a stub ("will be added later"). `CameraManager` was always empty. `connect_all()` and `start_all()` were no-ops. Poll timer ran on empty list.
+- Even if cameras were registered, the wrong `open_framegrabber` parameter mapping would fail to open the correct camera.
+### Notes
+- Fix restores equivalent behavior from the working `camera_viewer.py` which uses the same `ha.info_framegrabber("GigEVision2", "info_boards")` pattern and passes device/ip as the Device parameter.
+- Previously applied fixes in `HalconDriver` (`grab_frame()`, `grab_image_start()`) are now reachable because cameras are actually connected.
+### Files Changed
+- app/application.py (initialize + _discover_and_register_cameras)
+- camera/services/halcon_driver.py (open_framegrabber parameter order)
+
+## 2026-07-24 17:00
+### What changed
+- **Fixed broken camera acquisition pipeline**: Added `grab_frame()` method to `HalconDriver` and added `grab_image_start()` call at end of `connect()`.
+### Why
+- `AcquisitionEngine._acquisition_loop()` called `self._driver.grab_frame()` which didn't exist on `HalconDriver`, causing `AttributeError` on every loop iteration. Frames were never produced.
+- `grab_image_start()` was never called, so HALCON never entered continuous acquisition mode.
+- Both of these omissions happened when the camera services layer was split from the monolithic `TV46LCamera` into `HalconDriver` + `AcquisitionEngine`. The `grab_frame()` method was accidentally not ported.
+### Notes
+- Regression introduced during services-layer refactoring (Phase 7/8 ROI integration).
+- Pre-existing LSP type errors on `_framegrabber` (typed as `None | ...`) are harmless and unrelated.
+### Files Changed
+- camera/services/halcon_driver.py (connect + grab_frame)
+
+## 2026-07-24 16:30
+### What changed
+- **Fixed HALCON API compatibility**: Replaced `ha.HRegion.gen_*()` and `ha.HImage()` class-based API calls with standalone functions (`ha.gen_rectangle1()`, `ha.gen_circle()`, `ha.gen_ellipse()`, `ha.gen_region_polygon_filled()`, `ha.himage_from_numpy_array()`). The HALCON Python module at this site does not expose `HRegion` or `HImage` classes — only module-level functions.
+### Why
+- `geometry_to_hregion.py` used `ha.HRegion.gen_rectangle1(...)` which raised `AttributeError: module 'halcon' has no attribute 'HRegion'` at runtime. Same for `ha.HImage()` in `statistics.py`.
+- Direct inspection of `dir(halcon)` confirmed no `HRegion`/`HImage` exports; all region/image creation is via standalone functions returning `ha.HObject`.
+### Notes
+- Type annotations changed from `ha.HRegion`/`ha.HImage` to `ha.HObject` which IS accessible.
+- `_numpy_to_himage` simplified from two-step (`HImage()` + `.gen_image1()`) to single `ha.himage_from_numpy_array()` call.
+- LSP type-checking false positives remain for HALCON operator return types (incomplete PEP 484 stubs).
+### Files Changed
+- roi/geometry_to_hregion.py (6 callsites + type hints)
+- roi/statistics.py (type hints + _numpy_to_himage body)
+- tests/test_roi_phase2.py (3 callsites)
+
 ## 2026-07-24
 ### What changed
 - **ROI Subsystem Phase 1 (Foundation — revision 2)**: Addressed review feedback across all modules.
@@ -489,3 +554,117 @@
 - The `_grab_loop` now also logs the timeout count on each failure cycle
 ### Files Changed
 - camera/tv46l_camera.py (added `import sys`, instrumented `_grab_loop`, `_grab_raw_frame`, `_execute_manual_nuc`, `flush_buffers`)
+
+## 2026-07-24 16:55
+### What changed
+- Fixed `DrawingObjectFactory.attach_to_window` argument order: swapped `draw_obj` and `window_handle` to match HALCON's `attach_drawing_object_to_window(window_handle, draw_handle)` signature.
+- Fixed `DrawingObjectFactory.set_callback` to catch `Exception` (not `TypeError`) when setting Python callables — the actual exception is `halcon.ffi.HTupleConversionError`, which is not a subclass of `TypeError`.
+- Added `check_callable(callback)` guard before calling `set_drawing_object_callback` to gracefully skip unsupported callback types.
+- Added class-scoped `halcon_window` fixture in tests using `ha.open_window(..., "buffer", "")` to provide a valid window handle for HALCON-dependent tests.
+- Fixed unused import lint warnings across editor package and tests (10 removals via `ruff --fix`).
+### Why
+- All `TestROIEditorManagerWithHalcon` tests failed because window handle `123` was invalid; they now use a real buffer window from `ha.open_window`.
+- Callback tests failed with `HTupleConversionError` because the Python HALCON binding doesn't accept `Callable` as callback — only `int`/`Sequence[int]` for HLibProCall.
+- `attach_drawing_object_to_window` had the correct C API signature but arguments were swapped in our Python code.
+### Notes
+- Buffer windows created via `ha.open_window` work headlessly and accept drawing object attachment.
+- HALCON type-stub LSP errors (HHandle vs object, callable vs MaybeSequence[int]) remain as pre-existing false positives.
+### Files Changed
+- roi/editor/drawing_object_factory.py (swapped attach args, fixed callback exception type)
+- tests/test_roi_editor.py (added halcon_window fixture, switched 123 -> self.window, removed unused imports)
+
+## 2026-07-24 17:30
+### What changed
+- Implemented `alarm/` package — standalone, deterministic alarm engine with no HALCON or GUI dependencies:
+  - `conditions.py` — Strategy pattern for alarm conditions (HIGH, LOW, RANGE) via `ConditionEvaluator` ABC with registry (`get_evaluator`, `register_evaluator`). Each evaluator handles NaN values, hysteresis (trigger vs clear thresholds), and selects the appropriate statistic (max for HIGH, min for LOW, mean for RANGE).
+  - `state_machine.py` — `AlarmState` enum (NORMAL → PENDING → ACTIVE → ACKNOWLEDGED → CLEARED) and `AlarmStateMachine` with frame-timestamp-based delay timing, `is_valid_transition()` validation, `acknowledge()`, `force_clear()`, and `reset()`.
+  - `events.py` — Immutable `AlarmEvent` dataclass (`frozen=True, slots=True`) with `AlarmEventKind` (ACTIVATED, CLEARED, ACKNOWLEDGED, RESET).
+  - `evaluator.py` — `AlarmEvaluator` (pure function, no side effects) evaluates one ROI using `RuntimeROIStatistics` + `ROIAlarmSettings` + `AlarmStateMachine`.
+  - `history.py` — `AlarmHistory` with per-ROI and global event querying, `clear()`.
+  - `manager.py` — `AlarmManager` with per-ROI state machines, `evaluate()`, `evaluate_all()`, `acknowledge()`, `reset()`, `register()`, `unregister()`, `clear_all()`, `on_event` callback, thread-safe via `threading.Lock`.
+  - `interfaces.py` — `ConditionEvaluator` ABC (strategy), `AlarmEventHandler` protocol.
+  - `__init__.py` — Public API exports.
+- Created `tests/test_alarm.py` — 104 tests covering all state transitions, hysteresis, delay, acknowledge, reset, disabled alarms, invalid stats, NaN values, multiple ROI independence, event generation, history, edge cases, and custom evaluator registration.
+### Why
+- The existing `processing/alarm_processor.py` used old types (`ROIResult`, `AlarmThreshold`), lacked PENDING state, hysteresis, acknowledgement, history, and used `time.monotonic()` (non-deterministic).
+- Phase 5 requires a clean, testable, deterministic alarm engine that consumes `RuntimeROIStatistics` and `ROIAlarmSettings` (the new Layer 2 types).
+### Notes
+- Delay timing uses frame timestamps (not wall clock) for deterministic testing.
+- Evaluator registry is extensible — future conditions (DELTA, RATE, HOTSPOT) can be added via `register_evaluator`.
+- No HALCON, GUI, persistence, or recording dependencies.
+- Thread safety via per-method `Lock` in `AlarmManager`.
+### Files Changed
+- alarm/__init__.py (new)
+- alarm/conditions.py (new)
+- alarm/events.py (new)
+- alarm/evaluator.py (new)
+- alarm/history.py (new)
+- alarm/interfaces.py (new)
+- alarm/manager.py (new)
+- alarm/result.py (new)
+- alarm/state_machine.py (new)
+- tests/test_alarm.py (new)
+
+## 2026-07-24 17:30
+### What changed
+- **Phase 6 (Persistence) enhancements**: Added `Project` data model with `CameraReference`, `ProjectRepository` for project-level CRUD, forward-compatible schema handling (warns instead of raises for future versions, preserves unknown fields through round-trip), and enhanced ROI value validation (hex color format, alarm condition enum values, geometry bounds).
+- **Forward compatibility**: `validate_schema_version` now logs a warning for future schema versions instead of raising `SchemaVersionError`. Unknown top-level fields are extracted during read, stored, and re-injected during write.
+- **Value validation**: New `validate_roi_values()` function validates hex color format (`#RRGGBB`), alarm condition enum membership, and geometry field constraints (positive numbers, rectangle row2>row1/col2>col1, positive circle radius, positive ellipse radii).
+- **Example**: Added `config/roi/project.json.example` with sample project/camera hierarchy.
+### Why
+- Spec requires a project-level entry point for multi-camera deployments (per `ROI_Design_Decisions.md` and `ROI_Subsystem_Plan_Part2.md`).
+- Forward compatibility is critical for long-lived installations where schema version may be updated by different application versions.
+- Value validation catches common configuration errors early, before they propagate to the GUI or HALCON layer.
+### Notes
+- Existing `JSONROIRepository` unchanged; `ProjectRepository` is a separate class alongside it.
+- `_extra_fields` stored by file path in `JSONROIRepository._extra_fields`; fallback to disk read on cache miss.
+- 30 new tests: project serialization (6), project repository (11), forward compatibility (4), value validation (9).
+- Total persistence tests: 75 (all passing).
+### Files Changed
+- roi/persistence/project.py (new)
+- roi/persistence/schema.py (modified — forward-compat, validation)
+- roi/persistence/serializer.py (modified — project serialization, helpers)
+- roi/persistence/repository.py (modified — extra fields, ProjectRepository)
+- roi/persistence/__init__.py (modified — exports)
+- tests/test_roi_persistence.py (modified — 30 new tests)
+- config/roi/project.json.example (new)
+
+## 2026-07-24 15:20
+### What changed
+- **Phase 7 (GUI Integration)**: Wired ROI subsystem into MainWindow. Added right-side ROI panel with toolbar, list, and property panel. Connected signal bus to workspace, selection manager, and dirty tracker.
+- **`gui/main_window.py`** (modified): Added `_init_roi()` to create signal bus, selection manager, dirty tracker, editor manager, repository, and workspace. Modified layout to a horizontal splitter: camera tiles (left) + ROI panel (right). Added `_build_roi_panel()` creating the ROI toolbar, list widget, and property panel. Added `_connect_roi_signals()` wiring toolbar→signal bus, list→signal bus, property panel→signal bus, and signal bus→widget updates. Camera tile click now loads ROI state for the selected camera.
+- **`gui/roi/roi_workspace.py`** (modified): `_on_edit_start()` now catches editor errors gracefully (logging a warning) so ROI creation works even when no HALCON window is available. Removed unused imports (`ROIManager`, `ROICommand`).
+- **`gui/roi/roi_list_widget.py`** (modified): Removed unused `ROIAlarmCondition` import.
+- **`gui/roi/roi_property_panel.py`** (modified): Removed unused imports (`QHBoxLayout`, `QPushButton`, `ROIAlarmSettings`, `ROIRecordingSettings`, `ROIStyle`).
+- **`tests/test_roi_gui.py`** (fixed): Multi-arg signal tests now use lambdas to capture both arguments. Workspace tests pass without real HALCON window (editor failure handled gracefully). Removed unused `pytest` import.
+### Why
+- Complete the GUI integration for Phase 7 — users can now create, view, select, and edit ROIs through the main application window with full dirty tracking and save support.
+- The workspace no longer crashes on editor failure, enabling ROI creation in test environments and when HALCON windows aren't available.
+### Notes
+- Editor manager uses `window_handle=0` as placeholder; real HALCON windows from ThermalView can be wired later.
+- Signal bus wiring follows the architecture: toolbar/list/property → signal bus → workspace → signal bus → widget updates.
+- Save button is disabled until dirty state is set (via toolbar.set_dirty).
+### Files Changed
+- gui/main_window.py
+- gui/roi/roi_workspace.py
+- gui/roi/roi_list_widget.py
+- gui/roi/roi_property_panel.py
+- tests/test_roi_gui.py
+
+## 2026-07-24
+### What changed
+- **Phase 8 (System Integration)**: Wired ROI processing into the frame loop. All cameras now have per-camera `RuntimeROIManagerImpl` instances. Alarm evaluation runs on every frame. Statistics and alarm state signals update the ROI list widget.
+### Files Changed
+- gui/roi/roi_workspace.py — Added per-camera `_runtime_managers: dict[str, RuntimeROIManagerImpl]`, `_alarm_manager`, `_active_camera_id`, `process_frame()` method. All `_runtime_manager` references replaced with active camera lookups. Alarm registration on create/duplicate/load_state; unregistration on delete. Added `add_configuration()` to runtime manager (incremental ROI add without clearing existing ROIs).
+- gui/main_window.py — `_process_frame()` now gets temperature image and calls `workspace.process_frame()`. Added `_on_roi_statistics_updated()` and `_on_roi_alarm_state_changed()` handlers wired to signal bus.
+- gui/roi/roi_property_panel.py — Added `is_current_roi()` method.
+- roi/runtime_manager.py — Added `add_configuration()` method for incremental ROI addition without `unload()`.
+- docs/ROI_Runtime_Flow.md — New architecture documentation.
+- tests/test_roi_integration.py — 26 integration tests covering frame processing, alarm triggering, signal emission, multi-camera independence, alarm registration lifecycle, edge cases (empty/nan temps, camera switch, edit-then-process).
+### Why
+- Complete the integration of all ROI subsystem components (ROIWorkspace, RuntimeROIManagerImpl, AlarmManager) into the live frame processing pipeline.
+- Per-camera managers enable independent ROI processing for all cameras simultaneously.
+- Signal-based GUI updates ensure thread safety.
+### Notes
+- 342 tests pass (6 pre-existing HALCON failures unchanged).
+- Zero regressions across all ROI GUI, persistence, alarm, editor, phase2, and integration tests.

@@ -9,19 +9,14 @@ This test verifies that all backend modules are correctly
 connected and can be instantiated.
 """
 import sys
-import time
-import traceback
 from pathlib import Path
 
-import cv2
-import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 from camera.models.camera_model import CameraModel
 from camera.models.position_model import PositionModel
-from camera.models.camera_context import CameraContext
 from camera.manager.position_manager import PositionManager
 from camera.manager.camera_manager import CameraManager
 from camera.factory.camera_factory import CameraFactory

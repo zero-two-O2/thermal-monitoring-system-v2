@@ -31,10 +31,8 @@ TEST_PARAMETER: str = ""
 import csv
 import json
 import sys
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import halcon as ha
@@ -49,24 +47,17 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QRadioButton,
-    QSizePolicy,
-    QSplitter,
-    QStatusBar,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
-    QTextEdit,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,

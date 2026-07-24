@@ -154,15 +154,15 @@ def main():
                 set_and_verify(camera, lim_max)
 
             elif key == ord('1'):
-                print(f"\n  Setting focus to 300 mm")
+                print("\n  Setting focus to 300 mm")
                 set_and_verify(camera, 300.0)
 
             elif key == ord('2'):
-                print(f"\n  Setting focus to 500 mm")
+                print("\n  Setting focus to 500 mm")
                 set_and_verify(camera, 500.0)
 
             elif key == ord('3'):
-                print(f"\n  Setting focus to 1000 mm")
+                print("\n  Setting focus to 1000 mm")
                 set_and_verify(camera, 1000.0)
 
     except KeyboardInterrupt:

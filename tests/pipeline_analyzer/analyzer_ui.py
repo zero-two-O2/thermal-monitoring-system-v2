@@ -10,7 +10,6 @@ Usage:
 
 from __future__ import annotations
 
-import math
 import sys
 import time
 from pathlib import Path
@@ -32,7 +31,6 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QSplitter,
     QStatusBar,
     QTabWidget,
@@ -61,10 +59,6 @@ from tests.pipeline_analyzer.analyzer_core import (
     CameraPauseEvent,
     MulticameraAnalyzerManager,
     CrossCameraSnapshot,
-    BottleneckDetector,
-    EventLog,
-    IsolationResult,
-    detect_horizontal_distortion,
 )
 
 # ==========================================================
@@ -228,7 +222,7 @@ def _discover_cameras() -> list[CameraInfo]:
             ))
         print(f"[INFO] Total cameras discovered: {len(cameras)}")
     except Exception:
-        print(f"[ERROR] Camera discovery failed:")
+        print("[ERROR] Camera discovery failed:")
         traceback.print_exc()
     return cameras
 
@@ -612,7 +606,6 @@ class TimelineView(QTableWidget):
             "Qt Rendering",
         ]
 
-        from collections import defaultdict
 
         for row, cid in enumerate(cids):
             snap = cross.camera_snapshots[cid]

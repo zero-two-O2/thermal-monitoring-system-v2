@@ -32,7 +32,7 @@ WARN = "[WARN]"
 
 def phase1_camera_info(camera: TV46LCamera):
     print(f"\n{'='*60}")
-    print(f"  Phase 1: Camera Info & Frame Rate")
+    print("  Phase 1: Camera Info & Frame Rate")
     print(f"{'='*60}")
 
     # Configured frame rate
@@ -73,7 +73,7 @@ def phase1_camera_info(camera: TV46LCamera):
 
     # Stream statistics
     stats = camera.get_stream_statistics()
-    print(f"  Stream statistics:")
+    print("  Stream statistics:")
     for key, val in stats.items():
         print(f"    {key}: {val}")
 
@@ -92,7 +92,7 @@ def phase1_camera_info(camera: TV46LCamera):
 
 def phase2_jitter_60s(camera: TV46LCamera):
     print(f"\n{'='*60}")
-    print(f"  Phase 2: Frame Jitter Analysis (60 seconds)")
+    print("  Phase 2: Frame Jitter Analysis (60 seconds)")
     print(f"{'='*60}")
 
     timestamps = []
@@ -151,7 +151,7 @@ def phase2_jitter_60s(camera: TV46LCamera):
         else:
             buckets[">1s"] += 1
 
-    print(f"  Interval distribution:")
+    print("  Interval distribution:")
     for label, count in buckets.items():
         if count > 0:
             pct = count / len(intervals) * 100
@@ -162,7 +162,7 @@ def phase2_jitter_60s(camera: TV46LCamera):
 
 def phase3_focus_fps_impact(camera: TV46LCamera):
     print(f"\n{'='*60}")
-    print(f"  Phase 3: FPS During Focus Movement")
+    print("  Phase 3: FPS During Focus Movement")
     print(f"{'='*60}")
 
     targets = [1000, 1000000, 500, 300, 1000000]
@@ -227,22 +227,22 @@ def phase3_focus_fps_impact(camera: TV46LCamera):
 
 def phase4_drift_root_cause(camera: TV46LCamera):
     print(f"\n{'='*60}")
-    print(f"  Phase 4: Drift Root-Cause Verification")
+    print("  Phase 4: Drift Root-Cause Verification")
     print(f"{'='*60}")
-    print(f"")
-    print(f"  Hypothesis: Phase 4 in diagnose_focus.py writes")
-    print(f"  FLK_TI_ControlFeature_SetFocusDistanceMm = 500")
-    print(f"  immediately before Phase 5 drift monitoring.")
-    print(f"  Focus commands are ASYNCHRONOUS — the HALCON")
-    print(f"  call returns immediately, but the lens takes")
-    print(f"  1-2s to physically reach the target.")
-    print(f"")
-    print(f"  The 'drift' from 1000000→502 is actually the")
-    print(f"  lens responding to the Phase 4 write target=500.")
-    print(f"")
+    print("")
+    print("  Hypothesis: Phase 4 in diagnose_focus.py writes")
+    print("  FLK_TI_ControlFeature_SetFocusDistanceMm = 500")
+    print("  immediately before Phase 5 drift monitoring.")
+    print("  Focus commands are ASYNCHRONOUS — the HALCON")
+    print("  call returns immediately, but the lens takes")
+    print("  1-2s to physically reach the target.")
+    print("")
+    print("  The 'drift' from 1000000→502 is actually the")
+    print("  lens responding to the Phase 4 write target=500.")
+    print("")
 
     # Verify: set focus to 1000000, then immediately poll
-    print(f"  Setting focus to 1000000 mm...")
+    print("  Setting focus to 1000000 mm...")
     camera.set_focus_distance(1000000)
     time.sleep(2.0)  # Wait for settle
 
@@ -250,7 +250,7 @@ def phase4_drift_root_cause(camera: TV46LCamera):
     print(f"  Current focus: {cur:.0f} mm")
 
     # Now poll CurrentFocusDistanceMm every 0.1s without any write
-    print(f"\n  Polling CurrentFocusDistanceMm for 15s (NO writes)...")
+    print("\n  Polling CurrentFocusDistanceMm for 15s (NO writes)...")
     history = []
     for i in range(150):  # 15 seconds
         raw = ha.get_framegrabber_param(
@@ -275,19 +275,19 @@ def phase4_drift_root_cause(camera: TV46LCamera):
 
     # Now write focus to 1000000 again, then immediately do Phase 4's
     # writes (as int then float) and verify they trigger the "drift"
-    print(f"\n  Simulating Phase 4 writes:")
-    print(f"    Setting focus to 1000000 mm...")
+    print("\n  Simulating Phase 4 writes:")
+    print("    Setting focus to 1000000 mm...")
     camera.set_focus_distance(1000000)
     time.sleep(2.0)
     cur = camera.get_focus_distance()
     print(f"    Current focus before Phase 4 writes: {cur:.0f} mm")
 
     # Phase 4 writes
-    print(f"    Write SetFocusDistanceMm = 500 (int)...")
+    print("    Write SetFocusDistanceMm = 500 (int)...")
     ha.set_framegrabber_param(
         camera._acq, "FLK_TI_ControlFeature_SetFocusDistanceMm", 500
     )
-    print(f"    Write SetFocusDistanceMm = 500 (float)...")
+    print("    Write SetFocusDistanceMm = 500 (float)...")
     ha.set_framegrabber_param(
         camera._acq, "FLK_TI_ControlFeature_SetFocusDistanceMm", 500.0
     )
@@ -297,7 +297,7 @@ def phase4_drift_root_cause(camera: TV46LCamera):
     print(f"    Current focus IMMEDIATELY after writes: {cur:.0f} mm")
 
     # Now poll to see the drift
-    print(f"\n  Polling for 15s to observe drift from target=500...")
+    print("\n  Polling for 15s to observe drift from target=500...")
     history2 = []
     for i in range(150):
         raw = ha.get_framegrabber_param(
@@ -313,7 +313,7 @@ def phase4_drift_root_cause(camera: TV46LCamera):
 
     final = history2[-1]
     print(f"\n  Final value after 15s: {final:.0f} mm")
-    print(f"  Expected (from Phase 4 write): ~500 mm")
+    print("  Expected (from Phase 4 write): ~500 mm")
     if abs(final - 500) < 50:
         print(f"  {PASS} CONFIRMED: 'Drift' is lens responding to Phase 4 command.")
     else:
@@ -365,7 +365,7 @@ def main():
 
         # Summary
         print(f"\n{'='*60}")
-        print(f"  SUMMARY")
+        print("  SUMMARY")
         print(f"{'='*60}")
         print(f"  Frame count:              {camera.frame_count}")
         print(f"  Timeout count:            {camera.timeout_count}")

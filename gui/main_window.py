@@ -37,6 +37,19 @@ from camera.models.camera_context import CameraContext
 from gui.widgets.camera_control_panel import CameraControlPanel
 from gui.widgets.camera_tile import CameraTile
 
+from gui.roi import (
+    ROISignalBus,
+    ROISelectionManager,
+    ROIDirtyTracker,
+    ROIWorkspace,
+    ROIListWidget,
+    ROIPropertyPanel,
+    ROIToolbar,
+)
+from roi.acquisition_state import AcquisitionState
+from roi.editor.editor_manager import ROIEditorManager
+from roi.persistence.repository import JSONROIRepository
+
 from utilities import logger
 
 
@@ -114,8 +127,31 @@ class MainWindow(QMainWindow):
         self._focus_busy = False
         self._nuc_busy = False
 
+        self._init_roi()
         self._build_ui()
         self._apply_theme()
+        self._connect_roi_signals()
+
+    # ---------------------------------------------------------
+    # ROI Initialization
+    # ---------------------------------------------------------
+
+    def _init_roi(self) -> None:
+        self._roi_signal_bus = ROISignalBus()
+        self._roi_selection = ROISelectionManager()
+        self._roi_dirty = ROIDirtyTracker()
+        self._roi_editor_mgr = ROIEditorManager(window_handle=0)
+        self._roi_repo = JSONROIRepository("./data/roi")
+        self._roi_workspace = ROIWorkspace(
+            signal_bus=self._roi_signal_bus,
+            repository=self._roi_repo,
+            selection_manager=self._roi_selection,
+            dirty_tracker=self._roi_dirty,
+            editor_manager=self._roi_editor_mgr,
+        )
+        self._roi_list = None
+        self._roi_property = None
+        self._roi_toolbar = None
 
     # ---------------------------------------------------------
     # UI Build
@@ -143,10 +179,16 @@ class MainWindow(QMainWindow):
         root.addWidget(toolbar)
 
         #
-        # Splitter: Tiles (top) / Control Panel (bottom)
+        # Splitter: Top (Tiles + ROI) / Control Panel (bottom)
         #
 
-        splitter = QSplitter(Qt.Vertical)
+        v_splitter = QSplitter(Qt.Vertical)
+
+        #
+        # Top: Horizontal splitter with Camera Tiles (left) + ROI Panel (right)
+        #
+
+        top_splitter = QSplitter(Qt.Horizontal)
 
         #
         # Camera Tile Grid
@@ -175,7 +217,20 @@ class MainWindow(QMainWindow):
             0,
         )
 
-        splitter.addWidget(self._tile_container)
+        top_splitter.addWidget(self._tile_container)
+
+        #
+        # ROI Panel
+        #
+
+        roi_panel = self._build_roi_panel()
+        roi_panel.setMinimumWidth(300)
+        top_splitter.addWidget(roi_panel)
+
+        top_splitter.setStretchFactor(0, 3)
+        top_splitter.setStretchFactor(1, 1)
+
+        v_splitter.addWidget(top_splitter)
 
         #
         # Camera Control Panel
@@ -192,12 +247,12 @@ class MainWindow(QMainWindow):
             self._on_focus_far
         )
 
-        splitter.addWidget(self._control_panel)
+        v_splitter.addWidget(self._control_panel)
 
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
+        v_splitter.setStretchFactor(0, 3)
+        v_splitter.setStretchFactor(1, 1)
 
-        root.addWidget(splitter)
+        root.addWidget(v_splitter)
 
         #
         # Status Bar
@@ -258,9 +313,158 @@ class MainWindow(QMainWindow):
 
         return bar
 
+    def _build_roi_panel(self) -> QWidget:
+
+        panel = QWidget()
+        panel.setObjectName("roiPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self._roi_toolbar = ROIToolbar()
+        layout.addWidget(self._roi_toolbar)
+
+        self._roi_list = ROIListWidget()
+        layout.addWidget(self._roi_list, 1)
+
+        self._roi_property = ROIPropertyPanel()
+        layout.addWidget(self._roi_property)
+
+        return panel
+
     def _apply_theme(self) -> None:
 
         self.setStyleSheet(LIGHT_THEME)
+
+    # ---------------------------------------------------------
+    # ROI Signal Wiring
+    # ---------------------------------------------------------
+
+    def _connect_roi_signals(self) -> None:
+
+        signal_bus = self._roi_signal_bus
+        selection = self._roi_selection
+        roi_list = self._roi_list
+        roi_property = self._roi_property
+        toolbar = self._roi_toolbar
+
+        # Toolbar → Signal bus (create/delete/duplicate/save)
+        toolbar.create_roi_requested.connect(
+            signal_bus.create_roi_requested.emit
+        )
+        toolbar.delete_requested.connect(
+            lambda _: signal_bus.delete_requested.emit(
+                selection.selected_id or ""
+            )
+        )
+        toolbar.duplicate_requested.connect(
+            lambda _: signal_bus.duplicate_requested.emit(
+                selection.selected_id or ""
+            )
+        )
+        toolbar.save_requested.connect(
+            signal_bus.save_requested.emit
+        )
+
+        # ROI List → Signal bus
+        roi_list.selection_changed.connect(
+            signal_bus.roi_selected.emit
+        )
+        roi_list.edit_requested.connect(
+            signal_bus.edit_requested.emit
+        )
+        roi_list.delete_requested.connect(
+            signal_bus.delete_requested.emit
+        )
+
+        # Property Panel → Signal bus
+        roi_property.alarm_changed.connect(
+            signal_bus.roi_alarm_changed.emit
+        )
+        roi_property.appearance_changed.connect(
+            signal_bus.roi_appearance_changed.emit
+        )
+        roi_property.recording_changed.connect(
+            signal_bus.roi_recording_changed.emit
+        )
+        roi_property.rename_requested.connect(
+            lambda rid, name: signal_bus.roi_renamed.emit(rid)
+        )
+
+        # Signal bus → Widget updates
+        signal_bus.roi_created.connect(
+            self._on_roi_created
+        )
+        signal_bus.roi_deleted.connect(
+            lambda rid: roi_list.remove_row(rid)
+        )
+        signal_bus.roi_selected.connect(
+            self._on_roi_selected
+        )
+        signal_bus.roi_geometry_changed.connect(
+            self._refresh_roi_list_row
+        )
+        signal_bus.roi_alarm_changed.connect(
+            self._refresh_roi_list_row
+        )
+        signal_bus.roi_appearance_changed.connect(
+            self._refresh_roi_list_row
+        )
+        signal_bus.roi_renamed.connect(
+            self._refresh_roi_list_row
+        )
+        signal_bus.dirty_state_changed.connect(
+            toolbar.set_dirty
+        )
+        signal_bus.roi_statistics_updated.connect(
+            self._on_roi_statistics_updated
+        )
+        signal_bus.roi_alarm_state_changed.connect(
+            self._on_roi_alarm_state_changed
+        )
+
+    def _on_roi_created(self, roi_id: str) -> None:
+        config = self._roi_workspace.get_configuration(roi_id)
+        if config is not None:
+            self._roi_list.add_row(config)
+
+    def _on_roi_selected(self, roi_id: str) -> None:
+        self._roi_list.highlight_row(roi_id)
+        config = self._roi_workspace.get_configuration(roi_id)
+        if config is not None:
+            self._roi_property.load_roi(config)
+
+    def _refresh_roi_list_row(self, roi_id: str) -> None:
+        config = self._roi_workspace.get_configuration(roi_id)
+        if config is not None:
+            self._roi_list.update_row(config)
+
+    def _on_roi_statistics_updated(self, camera_id: str) -> None:
+        if camera_id != self._roi_workspace.active_camera_id:
+            return
+        mgr = self._roi_workspace.get_runtime_manager(camera_id)
+        if mgr is None:
+            return
+        for roi in mgr.get_active():
+            if roi.statistics is None:
+                continue
+            s = roi.statistics
+            temp = s.maximum if s.valid else float("nan")
+            if s.valid:
+                self._roi_list.update_temperature(roi.configuration.roi_id, temp)
+
+    def _on_roi_alarm_state_changed(
+        self, roi_id: str, alarm_result: object
+    ) -> None:
+        from alarm import AlarmResult
+        if not isinstance(alarm_result, AlarmResult):
+            return
+        state_name = alarm_result.state.name if alarm_result.state else ""
+        self._roi_list.update_alarm_state(roi_id, state_name)
+        if self._roi_property.is_current_roi(roi_id):
+            config = self._roi_workspace.get_configuration(roi_id)
+            if config is not None:
+                self._roi_property.load_roi(config)
 
     # ---------------------------------------------------------
     # Camera Registration
@@ -460,6 +664,13 @@ class MainWindow(QMainWindow):
 
             rgb = cal.apply_colormap(display)
 
+            temperature = cal.raw_to_temperature(raw)
+            self._roi_workspace.process_frame(
+                camera_id=context.camera_id,
+                temperature_image=temperature,
+                frame_id=0,
+            )
+
             return rgb
 
         except Exception:
@@ -501,7 +712,16 @@ class MainWindow(QMainWindow):
                 f"Selected camera: {camera_id}"
             )
 
-        except Exception as exc:
+            # Notify ROI subsystem
+            self._roi_signal_bus.camera_changed.emit(camera_id)
+            acq_state = AcquisitionState(camera_id=camera_id)
+            self._roi_workspace.load_state(acq_state)
+            self._roi_list.rebuild(
+                self._roi_workspace.get_all_configurations()
+            )
+            self._roi_property.clear()
+
+        except Exception:
 
             logger.exception(
                 f"Failed to select camera {camera_id}"

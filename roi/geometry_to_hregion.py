@@ -6,22 +6,11 @@ Dedicated conversion layer between ROI geometry and HALCON HRegion.
 This module has exactly one responsibility:
     Convert ROIGeometry → HALCON HRegion
 
-It keeps HALCON code isolated from the rest of the ROI subsystem,
-following the project convention that HALCON calls belong in
-dedicated modules.
+It keeps HALCON code isolated from the rest of the ROI subsystem.
+No other module should call HALCON region constructors directly.
 
-The actual HALCON import is confined to the implementation functions.
-No other module needs to import `halcon` directly for region generation.
-
-Workflow
---------
-    Rectangle2ROI(row, col, phi, l1, l2)
-        ↓
-    geometry_to_hregion(geometry)
-        ↓
-    halcon.gen_rectangle2(row, col, phi, l1, l2)
-        ↓
-    HRegion
+Rule 2 of Phase 2:
+    "geometry_to_hregion is the only conversion layer"
 
 Mapping
 -------
@@ -30,9 +19,19 @@ Mapping
     CircleROI      →  gen_circle
     EllipseROI     →  gen_ellipse
     PolygonROI     →  gen_region_polygon
+
+Error handling
+--------------
+    - Geometry is validated before generation.
+    - If HALCON is unavailable, NotImplementedError is raised.
+    - If generation fails, the exception propagates to the caller
+      (RuntimeROIManager catches it and sets ERROR state).
 """
 
 from __future__ import annotations
+
+
+import halcon as ha
 
 from roi.geometry import (
     ROIGeometry,
@@ -43,8 +42,13 @@ from roi.geometry import (
     PolygonROI,
 )
 
+# Disable region clipping so standalone region generation works
+# even when no image has been read yet. By default HALCON clips
+# regions to the last-read image dimensions (silent empty region).
+ha.set_system("clip_region", "false")
 
-def geometry_to_hregion(geometry: ROIGeometry) -> object:
+
+def geometry_to_hregion(geometry: ROIGeometry) -> ha.HObject:
     """
     Convert an ROIGeometry to a HALCON HRegion.
 
@@ -56,9 +60,8 @@ def geometry_to_hregion(geometry: ROIGeometry) -> object:
 
     Returns
     -------
-    object
-        A HALCON HRegion object. Typed as object to avoid
-        a mandatory HALCON import at the call site.
+    ha.HRegion
+        A HALCON HRegion object matching the geometry.
 
     Raises
     ------
@@ -66,12 +69,6 @@ def geometry_to_hregion(geometry: ROIGeometry) -> object:
         If geometry validation fails before generation.
     TypeError
         If the geometry type is not supported.
-
-    Notes
-    -----
-    - Implementation will use halcon.HRegion() or the
-      corresponding gen_* operator.
-    - Geometry is validated before generation.
     """
     geometry.validate()
 
@@ -89,31 +86,57 @@ def geometry_to_hregion(geometry: ROIGeometry) -> object:
     raise TypeError(f"Unsupported geometry type: {type(geometry).__name__}")
 
 
-def _gen_rectangle1(geometry: Rectangle1ROI) -> object:
+def _gen_rectangle1(geometry: Rectangle1ROI) -> ha.HObject:
     """Generate HRegion from axis-aligned rectangle."""
-    # import halcon as ha
-    # return ha.HRegion.gen_rectangle1(
-    #     geometry.row1, geometry.col1,
-    #     geometry.row2, geometry.col2
-    # )
-    raise NotImplementedError("HALCON not yet available")
+    return ha.gen_rectangle1(
+        _round(geometry.row1),
+        _round(geometry.col1),
+        _round(geometry.row2),
+        _round(geometry.col2),
+    )
 
 
-def _gen_rectangle2(geometry: Rectangle2ROI) -> object:
+def _gen_rectangle2(geometry: Rectangle2ROI) -> ha.HObject:
     """Generate HRegion from rotated rectangle."""
-    raise NotImplementedError("HALCON not yet available")
+    return ha.gen_rectangle2(
+        geometry.row,
+        geometry.col,
+        geometry.phi,
+        geometry.length1,
+        geometry.length2,
+    )
 
 
-def _gen_circle(geometry: CircleROI) -> object:
+def _gen_circle(geometry: CircleROI) -> ha.HObject:
     """Generate HRegion from circle."""
-    raise NotImplementedError("HALCON not yet available")
+    return ha.gen_circle(
+        geometry.row,
+        geometry.col,
+        geometry.radius,
+    )
 
 
-def _gen_ellipse(geometry: EllipseROI) -> object:
+def _gen_ellipse(geometry: EllipseROI) -> ha.HObject:
     """Generate HRegion from ellipse."""
-    raise NotImplementedError("HALCON not yet available")
+    return ha.gen_ellipse(
+        geometry.row,
+        geometry.col,
+        geometry.phi,
+        geometry.radius1,
+        geometry.radius2,
+    )
 
 
-def _gen_polygon(geometry: PolygonROI) -> object:
+def _gen_polygon(geometry: PolygonROI) -> ha.HObject:
     """Generate HRegion from polygon."""
-    raise NotImplementedError("HALCON not yet available")
+    rows = [r for r, _ in geometry.points]
+    cols = [c for _, c in geometry.points]
+    return ha.gen_region_polygon_filled(
+        rows,
+        cols,
+    )
+
+
+def _round(value: float) -> int:
+    """Round a float to the nearest integer (HALCON pixel coordinate)."""
+    return int(round(value))

@@ -52,8 +52,9 @@ Always follow the project's coding standards and architecture guidelines defined
 
 
 # Halcon Standarde
-Whenever dealing with Halcon use the parameters in: 
+Whenever dealing with Halcon use the parameters and operators in: 
 Halcon_Parameters.md
+halcon_operators.md
 
 # Change History
 

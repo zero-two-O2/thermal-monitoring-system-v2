@@ -15,6 +15,8 @@ from processing.pipeline.processing_pipeline import ProcessingPipeline
 from processing.roi_processor import ROIProcessor
 from processing.alarm_processor import AlarmProcessor
 
+from utilities import logger
+
 
 class CameraFactory:
     """
@@ -41,9 +43,12 @@ class CameraFactory:
         #
 
         calibration_manager = CalibrationManager()
-        if camera_model.calibration_file:
-            calibration_manager.initialize(
-                camera_model.calibration_file
+        try:
+            calibration_manager.initialize()
+        except Exception as exc:
+            logger.warning(
+                f"Calibration init failed for "
+                f"{camera_model.camera_id}: {exc}"
             )
         #
         # Camera

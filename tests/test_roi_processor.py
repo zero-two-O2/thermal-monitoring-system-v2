@@ -10,16 +10,12 @@ Run:
 
 from __future__ import annotations
 import sys
-import time
 import traceback
 from pathlib import Path
 
-import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import traceback
-import numpy as np
 from processing.roi_processor import ROIProcessor
 from processing.models.processing_models import (
     RawFrame,

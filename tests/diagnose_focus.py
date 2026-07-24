@@ -121,7 +121,7 @@ AUTOFOCUS_PARAMS = [
 
 def phase2_read_autofocus_params(camera: TV46LCamera):
     print(f"\n{'='*60}")
-    print(f"  Phase 2: Camera Focus / Autofocus Parameters")
+    print("  Phase 2: Camera Focus / Autofocus Parameters")
     print(f"{'='*60}")
     for name in AUTOFOCUS_PARAMS:
         try:
@@ -209,7 +209,7 @@ def phase3_monitor_settle(camera: TV46LCamera, target: float, label: str = ""):
 
 def phase4_raw_halcon_timing(camera: TV46LCamera):
     print(f"\n{'='*60}")
-    print(f"  Phase 4: Raw HALCON Timing (no wrapper)")
+    print("  Phase 4: Raw HALCON Timing (no wrapper)")
     print(f"{'='*60}")
 
     # Measure set_framegrabber_param with various parameter types
@@ -338,7 +338,7 @@ def main():
         # Summary
         # ------------------------------------------------------------------
         print(f"\n{'='*60}")
-        print(f"  FINDINGS SUMMARY")
+        print("  FINDINGS SUMMARY")
         print(f"{'='*60}")
         print(f"  Focus limits reported:         {lo:.0f} – {hi:.0f} mm")
         print(f"  set_focus_distance wrapper:    ~{r1.get('cmd_time',0):.0f} ms")
@@ -351,7 +351,7 @@ def main():
                   f"in {r['settle_time']:.1f}s "
                   f"(range {min(h):.0f}-{max(h):.0f} mm)")
 
-        print(f"  Autofocus enabled:            check Phase 2 output above")
+        print("  Autofocus enabled:            check Phase 2 output above")
         print(f"  Frame timeout count:          {camera.timeout_count}")
         print(f"  Total frames acquired:        {camera.frame_count}")
 

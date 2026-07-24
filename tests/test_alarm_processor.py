@@ -14,11 +14,8 @@ import time
 import traceback
 from pathlib import Path
 
-import cv2
-import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import traceback
 
 from processing.alarm_processor import AlarmProcessor
 
@@ -34,7 +31,6 @@ from processing.models.roi_models import (
 from processing.models.alarm_models import (
     AlarmState,
 )
-import time
 
 
 

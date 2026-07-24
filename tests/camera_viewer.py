@@ -27,7 +27,6 @@ if _project_root not in sys.path:
 
 import cv2
 import halcon as ha
-import numpy as np
 import psutil
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from PyQt6.QtGui import (

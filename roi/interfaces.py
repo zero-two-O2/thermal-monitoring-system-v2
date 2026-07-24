@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 
 from roi.acquisition_state import AcquisitionState
 from roi.configuration import ROIConfiguration
-from roi.runtime import RuntimeROI, RuntimeROIState
+from roi.runtime import RuntimeROI, RuntimeROIState, RuntimeROIStatistics
 
 
 class ROIRepository(ABC):
@@ -77,14 +77,7 @@ class ROIRepository(ABC):
         self,
         configuration: ROIConfiguration,
     ) -> None:
-        """
-        Save (create or update) one ROI configuration.
-
-        Parameters
-        ----------
-        configuration : ROIConfiguration
-            The ROI configuration to persist.
-        """
+        """Save (create or update) one ROI configuration."""
         ...
 
     @abstractmethod
@@ -92,19 +85,7 @@ class ROIRepository(ABC):
         self,
         roi_id: str,
     ) -> bool:
-        """
-        Delete one ROI configuration by ID.
-
-        Parameters
-        ----------
-        roi_id : str
-            Identifier of the ROI to delete.
-
-        Returns
-        -------
-        bool
-            True if the ROI was deleted, False if not found.
-        """
+        """Delete one ROI configuration by ID."""
         ...
 
     @abstractmethod
@@ -112,19 +93,7 @@ class ROIRepository(ABC):
         self,
         roi_id: str,
     ) -> bool:
-        """
-        Check whether an ROI configuration exists.
-
-        Parameters
-        ----------
-        roi_id : str
-            Identifier of the ROI to check.
-
-        Returns
-        -------
-        bool
-            True if the ROI exists in persistent storage.
-        """
+        """Check whether an ROI configuration exists."""
         ...
 
 
@@ -134,26 +103,6 @@ class ROIManager(ABC):
 
     Bridges the ROIRepository (persistence) and the
     RuntimeROIManager (runtime cache).
-
-    Responsibilities
-    ----------------
-    - Load ROI configurations from the repository.
-    - Activate ROIs for a given acquisition state.
-    - Deactivate ROIs when the state changes.
-    - Forward configuration changes to RuntimeROIManager.
-    - Coordinate creation, deletion, and updates.
-
-    Must never:
-    - Contain HALCON or GUI code.
-    - Process images or evaluate alarms.
-    - Generate HRegions or Drawing Objects directly.
-    - Persist data (delegates to ROIRepository).
-
-    Notes
-    -----
-    - One ROIManager instance serves the entire application.
-    - It manages the relationship between persistent
-      configurations and runtime caches.
     """
 
     @abstractmethod
@@ -164,14 +113,8 @@ class ROIManager(ABC):
         """
         Load and activate all ROIs for a given acquisition state.
 
-        Called when a camera changes position (or zoom, focus, etc.).
         Delegates to ROIRepository for loading and to
         RuntimeROIManager for cache creation.
-
-        Parameters
-        ----------
-        acquisition_state : AcquisitionState
-            The camera state to load ROIs for.
         """
         ...
 
@@ -180,17 +123,7 @@ class ROIManager(ABC):
         self,
         acquisition_state: AcquisitionState,
     ) -> None:
-        """
-        Deactivate all ROIs for a given acquisition state.
-
-        Called when a camera leaves the given state.
-        Delegates to RuntimeROIManager to clear caches.
-
-        Parameters
-        ----------
-        acquisition_state : AcquisitionState
-            The camera state to unload ROIs for.
-        """
+        """Deactivate all ROIs for a given acquisition state."""
         ...
 
     @abstractmethod
@@ -198,17 +131,7 @@ class ROIManager(ABC):
         self,
         configuration: ROIConfiguration,
     ) -> None:
-        """
-        Add a new ROI configuration.
-
-        Persists via ROIRepository and updates runtime
-        cache via RuntimeROIManager.
-
-        Parameters
-        ----------
-        configuration : ROIConfiguration
-            The ROI configuration to add.
-        """
+        """Add a new ROI configuration."""
         ...
 
     @abstractmethod
@@ -216,17 +139,7 @@ class ROIManager(ABC):
         self,
         roi_id: str,
     ) -> None:
-        """
-        Remove an ROI configuration.
-
-        Deletes from ROIRepository and removes from
-        RuntimeROIManager cache.
-
-        Parameters
-        ----------
-        roi_id : str
-            Identifier of the ROI to remove.
-        """
+        """Remove an ROI configuration."""
         ...
 
     @abstractmethod
@@ -234,18 +147,7 @@ class ROIManager(ABC):
         self,
         configuration: ROIConfiguration,
     ) -> None:
-        """
-        Update an existing ROI configuration.
-
-        Persists changes and marks the runtime cache as dirty.
-        The cached HRegion will be regenerated on the
-        next processing cycle.
-
-        Parameters
-        ----------
-        configuration : ROIConfiguration
-            The updated ROI configuration.
-        """
+        """Update an existing ROI configuration."""
         ...
 
     @abstractmethod
@@ -253,19 +155,7 @@ class ROIManager(ABC):
         self,
         acquisition_state: AcquisitionState,
     ) -> list[ROIConfiguration]:
-        """
-        Get all active ROI configurations for a given state.
-
-        Parameters
-        ----------
-        acquisition_state : AcquisitionState
-            The camera state to query.
-
-        Returns
-        -------
-        list[ROIConfiguration]
-            Currently active ROI configurations.
-        """
+        """Get all active ROI configurations for a given state."""
         ...
 
 
@@ -277,26 +167,19 @@ class RuntimeROIManager(ABC):
     manages cached HRegions, and provides RuntimeROIs to the
     processing pipeline.
 
-    Responsibilities
-    ----------------
-    - Create RuntimeROI instances from ROIConfiguration.
-    - Generate and cache HALCON HRegions from geometry.
-    - Mark regions as dirty when configuration changes.
-    - Rebuild dirty regions before processing.
-    - Provide RuntimeROIs to the ROI Processor.
-    - Track runtime state and statistics for each ROI.
+    Responsibilities (Rule 9)
+    ------------------------
+    - Load configurations into runtime cache.
+    - Build and rebuild cached HRegions.
+    - Mark regions as dirty when config changes.
+    - Unload caches (release HALCON resources).
+    - Refresh per-frame statistics from temperature image.
+    - Expose active ROIs for the processing pipeline.
 
     Must never:
+    - Acquire images or perform GUI operations.
     - Persist data.
-    - Process images or calculate temperature statistics.
     - Evaluate alarm conditions.
-    - Contain GUI or Drawing Object code.
-
-    Notes
-    -----
-    - One RuntimeROIManager exists per active acquisition state.
-    - Created by ROIManager.load_state().
-    - Destroyed by ROIManager.unload_state().
     """
 
     @abstractmethod
@@ -305,16 +188,10 @@ class RuntimeROIManager(ABC):
         configurations: list[ROIConfiguration],
     ) -> None:
         """
-        Load ROI configurations into the runtime cache.
+        Load configurations into the runtime cache (Rule 8).
 
-        Creates RuntimeROI instances for each configuration.
-        HRegions are NOT generated here; they are generated
-        lazily when image dimensions are first known.
-
-        Parameters
-        ----------
-        configurations : list[ROIConfiguration]
-            The configurations to load.
+        Creates one RuntimeROI per configuration.
+        HRegions are NOT generated here (lazy via rebuild_dirty_regions).
         """
         ...
 
@@ -323,7 +200,7 @@ class RuntimeROIManager(ABC):
         self,
     ) -> None:
         """
-        Clear all RuntimeROI instances and cached regions.
+        Clear all RuntimeROI instances and release HALCON resources (Rule 10).
 
         Called when the camera acquisition state changes.
         """
@@ -333,14 +210,7 @@ class RuntimeROIManager(ABC):
     def get_all(
         self,
     ) -> list[RuntimeROI]:
-        """
-        Get all cached RuntimeROI instances for the current state.
-
-        Returns
-        -------
-        list[RuntimeROI]
-            All currently cached ROIs.
-        """
+        """All cached RuntimeROI instances for the current state."""
         ...
 
     @abstractmethod
@@ -348,19 +218,7 @@ class RuntimeROIManager(ABC):
         self,
         roi_id: str,
     ) -> RuntimeROI | None:
-        """
-        Get one RuntimeROI by its ID.
-
-        Parameters
-        ----------
-        roi_id : str
-            ROI identifier.
-
-        Returns
-        -------
-        RuntimeROI | None
-            The RuntimeROI if found, None otherwise.
-        """
+        """O(1) lookup by ROI ID (Rule 12)."""
         ...
 
     @abstractmethod
@@ -368,15 +226,7 @@ class RuntimeROIManager(ABC):
         self,
     ) -> list[RuntimeROI]:
         """
-        Get only enabled, non-error RuntimeROI instances.
-
-        Filters out disabled ROIs and ROIs in ERROR state.
-        This is the primary method used by the processing pipeline.
-
-        Returns
-        -------
-        list[RuntimeROI]
-            Active and valid ROIs ready for processing.
+        Enabled, non-error RuntimeROI instances ready for processing (Rule 7).
         """
         ...
 
@@ -386,15 +236,10 @@ class RuntimeROIManager(ABC):
         roi_id: str | None = None,
     ) -> None:
         """
-        Mark cached HRegions as dirty (needs rebuild).
+        Mark cached HRegions as dirty (Rule 4).
 
         If roi_id is provided, mark only that ROI.
         Otherwise, mark all cached regions as dirty.
-
-        Parameters
-        ----------
-        roi_id : str | None
-            Optional specific ROI to mark dirty.
         """
         ...
 
@@ -404,17 +249,17 @@ class RuntimeROIManager(ABC):
         image_shape: tuple[int, int],
     ) -> None:
         """
-        Rebuild all dirty HRegions from geometry.
+        Rebuild all dirty HRegions from geometry (Rule 4).
 
-        Called before processing to ensure all cached regions
-        are up-to-date. Uses geometry_to_hregion() internally.
+        Uses geometry_to_hregion() internally.
+        Failed conversions set RuntimeROIState.ERROR (Rule 7).
+        Successfully built regions become RuntimeROIState.ACTIVE.
 
         Parameters
         ----------
         image_shape : tuple[int, int]
             (height, width) of the current frame.
-            Required because HRegion generation may depend on
-            image dimensions for bounds checking.
+            Some region generators need image bounds.
         """
         ...
 
@@ -424,33 +269,22 @@ class RuntimeROIManager(ABC):
         roi_id: str,
         state: RuntimeROIState,
     ) -> None:
-        """
-        Update the runtime state of one ROI.
-
-        Parameters
-        ----------
-        roi_id : str
-            ROI identifier.
-        state : RuntimeROIState
-            New runtime state.
-        """
+        """Update the runtime state of one ROI."""
         ...
 
     @abstractmethod
     def refresh_statistics(
         self,
         roi_id: str,
+        statistics: RuntimeROIStatistics,
     ) -> None:
         """
-        Refresh cached statistics for one ROI.
+        Store computed statistics on a RuntimeROI (Rule 6).
 
-        Called after processing to update the statistics
-        stored on the RuntimeROI. This does NOT recalculate
-        statistics — it refreshes them from the processor.
+        Called by the processing pipeline after temperature
+        statistics have been extracted.
 
-        Parameters
-        ----------
-        roi_id : str
-            ROI identifier whose statistics to refresh.
+        This method does NOT compute statistics — it only
+        stores the result on the RuntimeROI instance.
         """
         ...
