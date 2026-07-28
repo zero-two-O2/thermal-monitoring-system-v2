@@ -78,8 +78,9 @@ class Application:
         if self._calibration_window is None:
             self._calibration_window = CalibrationWindow(self._controller)
             self._calibration_window.destroyed.connect(self._on_calibration_closed)
+        else:
+            self._calibration_window.refresh_camera_list()
 
-        self._calibration_window.refresh_camera_list()
         self._calibration_window.show()
         self._calibration_window.raise_()
         self._calibration_window.start_polling()
@@ -95,9 +96,8 @@ class Application:
         if self._observation_window is None:
             self._observation_window = ObserverWindow(self._controller)
             self._observation_window.destroyed.connect(self._on_observation_closed)
-            for ctx in self._controller.get_all_cameras():
-                self._observation_window.add_camera(ctx)
 
+        self._observation_window.refresh_cameras()
         self._observation_window.show()
         self._observation_window.raise_()
         self._observation_window.start_polling()

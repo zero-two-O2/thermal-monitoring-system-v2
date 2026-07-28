@@ -91,6 +91,8 @@ class TV46LCamera:
 
         self._connected = True
 
+        print(f"[Camera] {self.camera.camera_id} Connected")
+
         logger.info(
             f"{self.camera.camera_id} connected."
         )
@@ -128,6 +130,8 @@ class TV46LCamera:
         self.acquisition.start()
 
         self.camera.status = CameraStatus.STREAMING
+
+        print(f"[Camera] {self.camera.camera_id} Acquisition Started")
 
         logger.info(
             f"{self.camera.camera_id} acquisition started."

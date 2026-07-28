@@ -515,6 +515,7 @@ class MainWindow(QMainWindow):
     def _on_connect(self) -> None:
         try:
             self._controller.connect_all()
+            self._controller.start_all()
             self._refresh_table()
             self._poll_status()
             self._update_status("All cameras connected.")
@@ -636,6 +637,7 @@ class MainWindow(QMainWindow):
         for cid in ids:
             try:
                 self._controller.connect_camera(cid)
+                self._controller.start_camera(cid)
                 self._log_event(f"Camera {cid} connected", "INFO", "GUI")
             except Exception as exc:
                 logger.exception(f"Connect failed for {cid}: {exc}")
@@ -813,13 +815,10 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------
 
     def _update_button_states(self) -> None:
-        connected_count = len(self._controller.connected_cameras())
-        has_connected = connected_count > 0
-
-        self._calibration_btn.setEnabled(has_connected)
-        self._observation_btn.setEnabled(has_connected)
-        self._menu_calibration.setEnabled(has_connected)
-        self._menu_observation.setEnabled(has_connected)
+        self._calibration_btn.setEnabled(True)
+        self._observation_btn.setEnabled(True)
+        self._menu_calibration.setEnabled(True)
+        self._menu_observation.setEnabled(True)
 
     # ---------------------------------------------------------
     # Status Polling

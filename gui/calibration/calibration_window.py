@@ -334,8 +334,12 @@ class CalibrationWindow(QMainWindow):
     def refresh_camera_list(self) -> None:
         block = self._camera_combo.blockSignals(True)
         self._camera_combo.clear()
-        for ctx in self._controller.get_all_cameras():
-            self._camera_combo.addItem(ctx.camera_model.camera_name, ctx.camera_id)
+        cameras = self._controller.get_all_cameras()
+        if not cameras:
+            self._camera_combo.addItem("(No Cameras Found)", None)
+        else:
+            for ctx in cameras:
+                self._camera_combo.addItem(ctx.camera_model.camera_name, ctx.camera_id)
         self._camera_combo.blockSignals(block)
 
     def _on_camera_selected(self, index: int) -> None:
@@ -343,6 +347,10 @@ class CalibrationWindow(QMainWindow):
             return
         camera_id = self._camera_combo.itemData(index)
         if not camera_id:
+            self._selected_camera_id = None
+            self._control_panel.clear_selection()
+            self._status_label.setText("No camera selected")
+            self._camera_label.setText("Camera: None")
             return
         self._select_camera(camera_id)
 
@@ -391,6 +399,8 @@ class CalibrationWindow(QMainWindow):
             if raw is None:
                 return
 
+            print("[Calibration] Received Frame")
+
             cal = context.camera.get_calibration_manager()
             display = cal.raw_to_display(raw)
             rgb = cal.apply_colormap(display)
@@ -403,6 +413,8 @@ class CalibrationWindow(QMainWindow):
             )
 
             self._thermal_view.display_image(rgb)
+            print("[Calibration] Display Updated")
+
             self._control_panel.update_info(fps=0.0, status="streaming")
 
         except Exception:

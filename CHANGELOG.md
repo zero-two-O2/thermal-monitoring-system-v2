@@ -1,3 +1,27 @@
+## 2026-07-27 20:00
+### What changed
+- Fixed missing live camera feed in Calibration and Observation windows.
+- Two root causes identified and fixed:
+  1. Acquisition thread was never started after camera connection (AcquisitionEngine.start() never called by MainWindow connect handlers).
+  2. ThermalView.display_image() received numpy RGB arrays but tried to pass them to ha.disp_obj() which expects HALCON HImage objects. Also window handle was never created.
+- Changes:
+  - `gui/main_window.py`: Added `self._controller.start_all()` after `connect_all()` in `_on_connect()`, and `self._controller.start_camera(cid)` after `connect_camera(cid)` in `_on_connect_selected()`.
+  - `gui/roi/thermal_view.py`: Added QPixmap-based display path via `_display_numpy()` for numpy arrays, with proper BGR→RGB conversion and scaled rendering. HALCON display path preserved for HObject inputs. Placeholder/feed state management using stacked QLabel.
+- Verified: Same single acquisition thread feeds both Calibration and Observation windows. No second camera instance created.
+- Added temporary debug logging at each pipeline stage for verification.
+### Why
+- Cameras were discovered and connected but no frame data reached the GUI, making Calibration and Observation windows non-functional.
+### Notes
+- Debug logging can be removed after verification — look for `print("[Acquisition]`, `print("[Camera]`, `print("[Calibration]`, `print("[Observation]"` markers.
+- Temporary logging added in: acquisition_engine.py, tv46l_camera.py, calibration_window.py, observer_window.py.
+### Files Changed
+- gui/main_window.py
+- gui/roi/thermal_view.py
+- gui/calibration/calibration_window.py (debug logging only)
+- gui/observer/observer_window.py (debug logging only)
+- camera/services/acquisition_engine.py (debug logging only)
+- camera/services/tv46l_camera.py (debug logging only)
+
 ## 2026-07-25 02:00
 ### What changed
 - Created Settings window (`gui/settings_window.py`): QListWidget navigation (10 categories) + QStackedWidget pages. Categories: General, Appearance, Project, Cameras, ROI Defaults, Alarm Defaults, Recording, Logging, Network, Advanced. Each page has realistic placeholder controls (combos, spinboxes, checkboxes, line edits). Apply button per page.

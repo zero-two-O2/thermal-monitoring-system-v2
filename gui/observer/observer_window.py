@@ -200,6 +200,14 @@ class ObserverWindow(QMainWindow):
     # Camera Management
     # ---------------------------------------------------------
 
+    def refresh_cameras(self) -> None:
+        current_ids = {ctx.camera_id for ctx in self._controller.get_all_cameras()}
+        for cid in list(self._slot_map.keys()):
+            if cid not in current_ids:
+                self.remove_camera(cid)
+        for ctx in self._controller.get_all_cameras():
+            self.add_camera(ctx)
+
     def add_camera(self, context) -> None:
         camera_id = context.camera_id
         if camera_id in self._slot_map:
@@ -237,16 +245,14 @@ class ObserverWindow(QMainWindow):
 
     def _on_tile_double_clicked(self, camera_id: str) -> None:
         from gui.camera_detail_window import CameraDetailWindow
-        context = None
+        camera_name = camera_id if camera_id else "No Camera"
         for c in self._cameras:
             if c.camera_id == camera_id:
-                context = c
+                camera_name = c.camera_model.camera_name
                 break
-        if context is None:
-            return
         win = CameraDetailWindow(
             camera_id=camera_id,
-            camera_name=context.camera_model.camera_name,
+            camera_name=camera_name,
             controller=self._controller,
         )
         win.show()
@@ -274,11 +280,13 @@ class ObserverWindow(QMainWindow):
                 raw = context.camera.get_frame()
                 if raw is None:
                     continue
+                print("[Observation] Received Frame")
                 cal = context.camera.get_calibration_manager()
                 display = cal.raw_to_display(raw)
                 rgb = cal.apply_colormap(display)
                 if rgb is not None:
                     tile.update_frame(image=rgb, frame_count=0, sequence=0, latency_ms=0.0, dropped=0, timeouts=0, fps=0.0)
+                print("[Observation] Display Updated")
             except Exception:
                 pass
 

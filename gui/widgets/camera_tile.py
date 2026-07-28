@@ -189,6 +189,5 @@ class CameraTile(QFrame):
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
-        if self._camera_id:
-            self.double_clicked.emit(self._camera_id)
+        self.double_clicked.emit(self._camera_id)
         super().mouseDoubleClickEvent(event)

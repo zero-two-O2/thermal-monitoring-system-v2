@@ -133,6 +133,8 @@ class AcquisitionEngine:
             "Acquisition thread started."
         )
 
+        print("[Acquisition] Grab Thread Started")
+
         while self._running:
 
             try:
@@ -142,7 +144,11 @@ class AcquisitionEngine:
                 if frame is None:
                     continue
 
+                print("[Acquisition] Frame Grabbed")
+
                 self._push_frame(frame)
+
+                print("[Acquisition] Frame Emitted")
 
                 self._update_statistics()
 

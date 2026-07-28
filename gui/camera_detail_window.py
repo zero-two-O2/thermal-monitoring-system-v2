@@ -199,19 +199,21 @@ class CameraDetailWindow(QWidget):
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(16)
 
-        name = QLabel(self._camera_name)
-        name.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLOR_TEXT_PRIMARY};")
-        layout.addWidget(name)
+        self._header_name = QLabel(self._camera_name)
+        self._header_name.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLOR_TEXT_PRIMARY};")
+        layout.addWidget(self._header_name)
 
+        self._header_status_labels = []
         for label, color in [
-            ("Position 1", COLOR_TEXT_SECONDARY),
-            ("Alarm: None", COLOR_ALARM_GREEN),
-            ("Recording: Off", COLOR_ALARM_GRAY),
-            ("Connected", COLOR_ALARM_GREEN),
+            ("Position", COLOR_TEXT_SECONDARY),
+            ("Alarm", COLOR_ALARM_GREEN),
+            ("Recording", COLOR_ALARM_GRAY),
+            ("Status", COLOR_ALARM_GRAY),
         ]:
             lbl = QLabel(label)
             lbl.setStyleSheet(f"color: {color}; font-size: 11px; padding: 2px 8px; border-left: 1px solid {COLOR_BORDER};")
             layout.addWidget(lbl)
+            self._header_status_labels.append(lbl)
 
         layout.addStretch()
 
@@ -230,11 +232,32 @@ class CameraDetailWindow(QWidget):
     def stop_polling(self) -> None:
         self._poll_timer.stop()
 
+    def _update_connection_state(self) -> None:
+        context = self._controller.get_camera(self._camera_id)
+        if context is None or not context.is_connected:
+            self._header_name.setText(self._camera_name or "No Camera Connected")
+            if len(self._header_status_labels) >= 4:
+                self._header_status_labels[3].setText("Disconnected")
+                self._header_status_labels[3].setStyleSheet(
+                    f"color: {COLOR_ALARM_GRAY}; font-size: 11px; padding: 2px 8px; border-left: 1px solid {COLOR_BORDER};"
+                )
+            self._thermal_view.show_placeholder()
+            self._visible_view.show_placeholder()
+        else:
+            self._header_name.setText(self._camera_name)
+            if len(self._header_status_labels) >= 4:
+                self._header_status_labels[3].setText("Connected")
+                self._header_status_labels[3].setStyleSheet(
+                    f"color: {COLOR_ALARM_GREEN}; font-size: 11px; padding: 2px 8px; border-left: 1px solid {COLOR_BORDER};"
+                )
+
     def _poll(self) -> None:
         try:
             context = self._controller.get_camera(self._camera_id)
             if context is None:
+                self._update_connection_state()
                 return
+            self._update_connection_state()
             raw = context.camera.get_frame()
             if raw is None:
                 return
