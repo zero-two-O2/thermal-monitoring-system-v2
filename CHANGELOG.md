@@ -1,3 +1,49 @@
+## 2026-07-29
+### What changed
+- Created standalone HALCON ROI validation tool (`halcon_roi_validation.py`).
+- Exercises every drawing object: Rectangle1, Rectangle2, Circle, Ellipse, Polygon/XLD.
+- Registers callbacks for on_attach, on_detach, on_drag, on_resize, on_select.
+
+## 2026-07-29 (later)
+### What changed
+- Fixed `_numpy_to_halcon()` to use `gen_image1`/`gen_image3` with `ctypes.data` pointers (was silently failing with `ha.disp_obj(numpy_array)`).
+- Changed window mode `"buffer"` → `"visible"`, added `flush_buffer()` after `disp_obj`.
+- Added inline diagnostics every 30 frames (raw dtype/shape/stats, temperature min/max/mean, display range).
+- Added `set_part()` to scale displayed image to correct dimensions (was stretched to fill window).
+- Added key handler: press 'S' to save current raw/display/temperature frames to `frame_debug/`.
+- Suppressed verbose per-frame `numpy->HImage` log.
+- Fixed `_log_direct()` to also print to stdout so diagnostics appear on CLI.
+### Why
+- HALCON `disp_obj` rejects numpy arrays — needed `gen_image3` for 3-channel images and `gen_image1` for grayscale.
+- Diagnostics help compare pipeline against the working app frame-by-frame.
+### Notes
+- Working app's `ThermalView.display_image()` also silently fails with numpy arrays (caught by `except Exception: pass`).
+- BGR→RGB conversion in `_numpy_to_halcon` correctly feeds `gen_image3` channel order.
+### Files Changed
+- halcon_roi_validation.py
+
+## 2026-07-29 (FPS fix)
+### What changed
+- Added frame-number dedup in `_poll_frame()`: skip the entire calibration pipeline + HALCON display when `frame.frame_number` hasn't changed.
+- Added `_last_frame_number` attribute to track already-seen frames.
+### Why
+- Timer fires at 30 Hz but camera sends at ~9 Hz. Each tick was re-processing and re-displaying the same frame — wasting CPU and spamming `clear_window` + `disp_obj` + `set_part` + `flush_buffer` at 30 Hz.
+- HALCON window ops compete with GigE acquisition for internal GPU/network resources; throttling display to match camera rate prevents perceived packet loss.
+### Notes
+- Without dedup the display pipeline ran 3× per frame unnecessarily.
+### Files Changed
+- halcon_roi_validation.py
+- Validates get_drawing_object_params(), get_drawing_object_iconic(), set_drawing_object_params().
+- Appearance controls for color, line width, marker size.
+- Reuses production camera code (CameraDiscovery, TV46LCamera, CalibrationManager).
+- Live parameter display updates continuously during drag/resize.
+- Live event log for every HALCON callback invocation.
+### Why
+- Need independent HALCON API verification before continuing ROI subsystem.
+- Eliminate HALCON itself as a source of bugs in the ROI pipeline.
+### Files Changed
+- halcon_roi_validation.py
+
 ## 2026-07-25 00:30
 ### What changed
 - Removed duplicate Calibration/Observation buttons from toolbar (kept only bottom navigation buttons).
