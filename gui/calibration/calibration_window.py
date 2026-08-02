@@ -45,12 +45,16 @@ from utilities import logger
 
 class CalibrationWindow(QMainWindow):
     POLL_INTERVAL_MS = 33
+    NO_CAMERA_TEXT = "No Camera Connected"
 
     def __init__(self, controller: ApplicationController) -> None:
         super().__init__()
 
+        self.setAttribute(Qt.WA_DeleteOnClose)
+
         self._controller = controller
         self._selected_camera_id: str | None = None
+        self._has_frame = False
 
         self._build_ui()
         self._apply_theme()
@@ -59,6 +63,7 @@ class CalibrationWindow(QMainWindow):
 
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_frame)
+        self._update_no_camera_state()
 
     # ---------------------------------------------------------
     # ROI Initialization
@@ -336,18 +341,30 @@ class CalibrationWindow(QMainWindow):
         self._camera_combo.clear()
         for ctx in self._controller.get_all_cameras():
             self._camera_combo.addItem(ctx.camera_model.camera_name, ctx.camera_id)
+        if self._camera_combo.count() == 0:
+            # No camera connected is a normal state (development mode).
+            # The selector stays visible with a placeholder entry.
+            self._camera_combo.addItem(self.NO_CAMERA_TEXT, None)
         self._camera_combo.blockSignals(block)
 
     def _on_camera_selected(self, index: int) -> None:
         if index < 0:
             return
         camera_id = self._camera_combo.itemData(index)
-        if not camera_id:
-            return
         self._select_camera(camera_id)
 
-    def _select_camera(self, camera_id: str) -> None:
+    def _select_camera(self, camera_id: str | None) -> None:
         self._selected_camera_id = camera_id
+        self._has_frame = False
+        self._roi_toolbar.setEnabled(False)
+
+        if camera_id is None:
+            self._control_panel.clear_selection()
+            self._status_label.setText("No camera selected.")
+            self._camera_label.setText("No camera selected")
+            self._thermal_view.show_placeholder()
+            self._visible_view.show_placeholder()
+            return
 
         try:
             self._controller.select_camera(camera_id)
@@ -367,6 +384,13 @@ class CalibrationWindow(QMainWindow):
             self._roi_property.clear()
         except Exception:
             logger.exception("Failed to load ROI state for " + camera_id)
+
+    def _update_no_camera_state(self) -> None:
+        """Apply the initial no-camera presentation (development mode)."""
+        self._roi_toolbar.setEnabled(False)
+        self._thermal_view.show_placeholder()
+        self._visible_view.show_placeholder()
+        self._control_panel.clear_selection()
 
     # ---------------------------------------------------------
     # Frame Polling
@@ -390,6 +414,12 @@ class CalibrationWindow(QMainWindow):
             raw = context.camera.get_frame()
             if raw is None:
                 return
+
+            if not self._has_frame:
+                self._has_frame = True
+                # ROI creation requires a valid image.
+                self._roi_toolbar.setEnabled(True)
+                self._thermal_view.show_feed()
 
             cal = context.camera.get_calibration_manager()
             display = cal.raw_to_display(raw)

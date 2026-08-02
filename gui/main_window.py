@@ -102,12 +102,16 @@ class MainWindow(QMainWindow):
     calibration_requested = pyqtSignal()
     observation_requested = pyqtSignal()
     discover_requested = pyqtSignal()
+    cameras_disconnected = pyqtSignal(list)
+    camera_detail_dev_requested = pyqtSignal()
 
     POLL_INTERVAL_MS = 2000
     CLOCK_INTERVAL_MS = 1000
 
     def __init__(self, controller: ApplicationController) -> None:
         super().__init__()
+
+        self.setAttribute(Qt.WA_DeleteOnClose)
 
         self._controller = controller
         self._camera_rows: dict[str, int] = {}
@@ -164,8 +168,16 @@ class MainWindow(QMainWindow):
         view_menu = menu_bar.addMenu("View")
         self._menu_calibration = QAction("Calibration Window", self)
         self._menu_observation = QAction("Observation Window", self)
+        self._menu_detail_dev = QAction("Camera Detail (Dev)", self)
+        self._menu_detail_dev.setShortcut("Ctrl+D")
+        self._menu_detail_dev.setToolTip(
+            "Open a camera detail window without a connected camera "
+            "(developer/test mode)."
+        )
         view_menu.addAction(self._menu_calibration)
         view_menu.addAction(self._menu_observation)
+        view_menu.addSeparator()
+        view_menu.addAction(self._menu_detail_dev)
 
         help_menu = menu_bar.addMenu("Help")
         about_action = QAction("About", self)
@@ -483,6 +495,7 @@ class MainWindow(QMainWindow):
         self._menu_refresh.triggered.connect(self._on_refresh)
         self._menu_calibration.triggered.connect(self._on_calibration)
         self._menu_observation.triggered.connect(self._on_observation)
+        self._menu_detail_dev.triggered.connect(self._on_detail_dev)
 
     # ---------------------------------------------------------
     # Actions
@@ -504,6 +517,7 @@ class MainWindow(QMainWindow):
             self._update_status(f"Connect failed: {exc}")
 
     def _on_disconnect(self) -> None:
+        camera_ids = [c.camera_id for c in self._controller.get_all_cameras()]
         try:
             self._controller.disconnect_all()
             self._refresh_table()
@@ -512,6 +526,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             logger.exception("Disconnect failed")
             self._update_status(f"Disconnect failed: {exc}")
+        if camera_ids:
+            self.cameras_disconnected.emit(camera_ids)
 
     def _on_refresh(self) -> None:
         self._refresh_table()
@@ -523,6 +539,9 @@ class MainWindow(QMainWindow):
 
     def _on_observation(self) -> None:
         self.observation_requested.emit()
+
+    def _on_detail_dev(self) -> None:
+        self.camera_detail_dev_requested.emit()
 
     def _on_selection_changed(self) -> None:
         rows = self._table.selectionModel().selectedRows()
@@ -563,7 +582,8 @@ class MainWindow(QMainWindow):
         self._update_status("Selected cameras connected.")
 
     def _on_disconnect_selected(self) -> None:
-        for cid in self._get_checked_camera_ids():
+        camera_ids = self._get_checked_camera_ids()
+        for cid in camera_ids:
             try:
                 self._controller.disconnect_camera(cid)
             except Exception as exc:
@@ -571,6 +591,8 @@ class MainWindow(QMainWindow):
         self._refresh_table()
         self._poll_status()
         self._update_status("Selected cameras disconnected.")
+        if camera_ids:
+            self.cameras_disconnected.emit(camera_ids)
 
     def _get_checked_camera_ids(self) -> list[str]:
         ids = []
@@ -728,13 +750,13 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------
 
     def _update_button_states(self) -> None:
-        connected_count = len(self._controller.connected_cameras())
-        has_connected = connected_count > 0
-
-        self._calibration_btn.setEnabled(has_connected)
-        self._observation_btn.setEnabled(has_connected)
-        self._menu_calibration.setEnabled(has_connected)
-        self._menu_observation.setEnabled(has_connected)
+        # Navigation must never depend on camera availability.
+        # All windows open with placeholders when no camera is
+        # connected (development mode).
+        self._calibration_btn.setEnabled(True)
+        self._observation_btn.setEnabled(True)
+        self._menu_calibration.setEnabled(True)
+        self._menu_observation.setEnabled(True)
 
     # ---------------------------------------------------------
     # Status Polling

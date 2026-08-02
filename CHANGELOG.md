@@ -1,3 +1,23 @@
+## 2026-08-02 19:45
+### What changed
+- Added `WindowRegistry` (`app/window_registry.py`): single owner of all top-level windows with `WindowID` keys, `(id, instance_key)` addressing (one camera-detail window per camera), open/reuse/show/raise semantics, `on_open`/`on_close` lifecycle hooks, and auto-forget on external close via `destroyed` (`Qt.WA_DeleteOnClose`).
+- Refactored `Application` to own all windows through the registry and centralize navigation (`open_main/open_calibration/open_observation/open_camera_detail/close_camera_detail/close_all_windows`). Window modules are now imported lazily so startup never depends on the ROI/HALCON stack.
+- No-camera development mode: all windows open without cameras. Placeholders in `ThermalView` and `CameraTile`; `CalibrationWindow` gets a "No Camera Connected" combo entry and disabled-but-visible ROI toolbar; `CameraDetailWindow` polls silently for unknown cameras; hidden View menu item "Camera Detail (Dev)" (Ctrl+D) opens `dev_cam_1`.
+- `MainWindow` emits `cameras_disconnected(list)` and `camera_detail_dev_requested()`; calibration/observation navigation is always enabled.
+- Added `tests/test_window_architecture.py` (15 passing) and `docs/Window_Architecture.md`.
+### Why
+- Centralize window lifecycle (create/show/close/track) in one place, make every window openable without hardware for development, and prevent windows from constructing each other.
+### Notes
+- HALCON license error #2021 (system clock set back) blocks `gui.roi` import on this machine; the 13 ROI-dependent tests are skipped with a clear reason until the clock/license is fixed. The same error breaks pre-existing suite files (test_alarm, test_roi_*) — not caused by this change. Verify on a healthy machine.
+- Registry teardown bug fixed: destroyed-handler captures the windows dict + key, not `self` (GC clears `__dict__` first).
+- Application tests use `QT_QPA_PLATFORM=offscreen`.
+### Files Changed
+- app/window_registry.py (new)
+- app/application.py
+- gui/main_window.py, gui/roi/thermal_view.py, gui/widgets/camera_tile.py
+- gui/calibration/calibration_window.py, gui/observer/observer_window.py, gui/camera_detail_window.py
+- tests/test_window_architecture.py (new), docs/Window_Architecture.md (new), CHANGELOG.md
+
 ## 2026-08-02 18:30
 ### What changed
 - Dead code cleanup: removed 30 unused files (~347 lines) and 9 empty placeholder packages (`alarms/`, `core/`, `database/`, `recorder/`, `camera/workers/`, `camera/configuration/`, `camera/discovery/`, `processing/overlays/`, `processing/statistics/`).

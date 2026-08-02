@@ -83,18 +83,22 @@ class CameraTile(QFrame):
     def assign_camera(self, camera_id: str, name: str) -> None:
         self._camera_id = camera_id
         self._camera_name = name
-        self._name_label.setText(name if name else "No Camera")
+        self._name_label.setText(name if name else "No Camera Connected")
         self._name_label.setStyleSheet(f"font-size: 12px; font-weight: bold; color: {COLOR_TEXT_PRIMARY};")
+        self._pixmap = None
+        self._image_label.setText("No Camera Connected\n\nConnect a camera from\nthe Main Window")
+        self._image_label.setStyleSheet(f"color: {COLOR_ALARM_GRAY}; font-size: 11px; background-color: {COLOR_TOOLBAR}; border: 1px solid {COLOR_BORDER};")
 
     def clear_camera(self) -> None:
         self._camera_id = ""
         self._camera_name = ""
-        self._name_label.setText("No Camera")
+        self._name_label.setText("No Camera Connected")
         self._name_label.setStyleSheet(f"font-size: 12px; font-weight: bold; color: {COLOR_ALARM_GRAY};")
         self._connected = False
         self._pixmap = None
         self._image_label.clear()
-        self._image_label.setStyleSheet(f"background-color: {COLOR_TOOLBAR}; border: 1px solid {COLOR_BORDER};")
+        self._image_label.setText("No Camera Connected\n\nConnect a camera from\nthe Main Window")
+        self._image_label.setStyleSheet(f"color: {COLOR_ALARM_GRAY}; font-size: 11px; background-color: {COLOR_TOOLBAR}; border: 1px solid {COLOR_BORDER};")
         self._status_label.setText("Disconnected")
         self._status_label.setStyleSheet(f"color: {COLOR_ALARM_GRAY}; font-size: 10px;")
         self._position_label.setText("---")
@@ -163,6 +167,7 @@ class CameraTile(QFrame):
             self._fps_label.setText(f"{fps:.1f} FPS")
 
     def _update_pixmap(self, image: np.ndarray) -> None:
+        self._image_label.setText("")
         h, w = image.shape[:2]
         bytes_per_line = 3 * w
         qimage = QImage(image.data, w, h, bytes_per_line, QImage.Format_RGB888)

@@ -97,6 +97,8 @@ class ObserverWindow(QMainWindow):
     def __init__(self, controller: ApplicationController) -> None:
         super().__init__()
 
+        self.setAttribute(Qt.WA_DeleteOnClose)
+
         self._controller = controller
         self._tiles: list[CameraTile] = []
         self._slot_map: dict[str, int] = {}
@@ -107,6 +109,11 @@ class ObserverWindow(QMainWindow):
 
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_frames)
+
+        # All eight tiles always exist. Without connected cameras
+        # every tile shows the "No Camera Connected" placeholder.
+        for tile in self._tiles:
+            tile.clear_camera()
 
     def _build_ui(self) -> None:
         self.setWindowTitle("Observation - Operator Mode")

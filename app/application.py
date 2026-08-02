@@ -7,21 +7,25 @@ Responsibilities
 ----------------
 - Create QApplication
 - Create the ApplicationController
-- Create the MainWindow
-- Create CalibrationWindow and ObserverWindow on demand
+- Own every window through the WindowRegistry
+- Centralize navigation between windows
 - Initialize the backend
 - Start the Qt event loop
 - Shutdown the backend cleanly
+
+Windows are created, shown and closed only through the registry.
+No window constructs or manipulates another window.
 """
 
 from __future__ import annotations
 
 import sys
+import weakref
 
-from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 
 from app.application_controller import ApplicationController
+from app.window_registry import WindowID, WindowRegistry
 from gui.main_window import MainWindow
 
 
@@ -32,23 +36,96 @@ class Application:
     Owns:
         - QApplication
         - ApplicationController
-        - MainWindow
-        - CalibrationWindow (lazy)
-        - ObserverWindow (lazy)
+        - WindowRegistry (single owner of every window)
     """
+
+    DEV_CAMERA_ID = "dev_cam_1"
 
     def __init__(self) -> None:
 
-        self._qt_app = QApplication(sys.argv)
+        self._qt_app = QApplication.instance() or QApplication(sys.argv)
         self._controller = ApplicationController()
+        self._registry = WindowRegistry()
+        self._wired_main_windows: weakref.WeakSet = weakref.WeakSet()
 
-        self._window = MainWindow(self._controller)
+        self._register_windows()
+        self.open_main()
 
-        self._calibration_window = None
-        self._observation_window = None
-        self._camera_detail_windows: dict = {}
+    # ---------------------------------------------------------
+    # Window Registry
+    # ---------------------------------------------------------
 
-        self._wire_window_signals()
+    def _register_windows(self) -> None:
+        controller = self._controller
+
+        self._registry.register(
+            WindowID.MAIN,
+            lambda: MainWindow(controller),
+            on_open=self._wire_main_window,
+        )
+        self._registry.register(
+            WindowID.CALIBRATION,
+            lambda: self._make_calibration_window(),
+            on_open=lambda window: (
+                window.refresh_camera_list(),
+                window.start_polling(),
+            ),
+            on_close=lambda window: window.stop_polling(),
+        )
+        self._registry.register(
+            WindowID.OBSERVATION,
+            lambda: self._make_observation_window(),
+            on_open=lambda window: (
+                self._populate_observation_window(window),
+                window.start_polling(),
+            ),
+            on_close=lambda window: window.stop_polling(),
+        )
+        self._registry.register(
+            WindowID.CAMERA_DETAIL,
+            lambda camera_id, camera_name: self._make_camera_detail_window(
+                camera_id, camera_name
+            ),
+            on_open=lambda window: window.start_polling(),
+            on_close=lambda window: window.stop_polling(),
+        )
+
+    # Window modules are imported lazily so that starting the
+    # application never depends on optional modules (e.g. ROI/HALCON).
+    def _make_calibration_window(self):
+        from gui.calibration.calibration_window import CalibrationWindow
+
+        return CalibrationWindow(self._controller)
+
+    def _make_observation_window(self):
+        from gui.observer.observer_window import ObserverWindow
+
+        return ObserverWindow(self._controller)
+
+    def _make_camera_detail_window(self, camera_id: str, camera_name: str):
+        from gui.camera_detail_window import CameraDetailWindow
+
+        return CameraDetailWindow(camera_id, camera_name, self._controller)
+
+    def _wire_main_window(self, main_window: MainWindow) -> None:
+        if main_window in self._wired_main_windows:
+            return
+        self._wired_main_windows.add(main_window)
+        main_window.calibration_requested.connect(self.open_calibration)
+        main_window.observation_requested.connect(self.open_observation)
+        main_window.discover_requested.connect(self._on_discover_requested)
+        main_window.camera_detail_dev_requested.connect(
+            self._on_camera_detail_dev_requested
+        )
+        main_window.cameras_disconnected.connect(self._on_cameras_disconnected)
+
+    def _populate_observation_window(self, window) -> None:
+        for context in self._controller.get_all_cameras():
+            window.add_camera(context)
+
+    # ---------------------------------------------------------
+    # Properties
+    # ---------------------------------------------------------
 
     @property
     def qt_app(self) -> QApplication:
@@ -59,77 +136,52 @@ class Application:
         return self._controller
 
     @property
+    def registry(self) -> WindowRegistry:
+        return self._registry
+
+    @property
     def window(self) -> MainWindow:
-        return self._window
+        return self._registry.get(WindowID.MAIN)
 
     # ---------------------------------------------------------
-    # Signal Wiring
+    # Navigation
     # ---------------------------------------------------------
 
-    def _wire_window_signals(self) -> None:
-        self._window.calibration_requested.connect(self._open_calibration)
-        self._window.observation_requested.connect(self._open_observation)
-        self._window.discover_requested.connect(self._on_discover_requested)
+    def open_main(self) -> None:
+        self._registry.open(WindowID.MAIN)
 
-    def _open_calibration(self) -> None:
-        from gui.calibration.calibration_window import CalibrationWindow
+    def open_calibration(self) -> None:
+        self._registry.open(WindowID.CALIBRATION)
 
-        if self._calibration_window is None:
-            self._calibration_window = CalibrationWindow(self._controller)
-            self._calibration_window.destroyed.connect(self._on_calibration_closed)
+    def open_observation(self) -> None:
+        self._registry.open(WindowID.OBSERVATION)
 
-        self._calibration_window.refresh_camera_list()
-        self._calibration_window.show()
-        self._calibration_window.raise_()
-        self._calibration_window.start_polling()
+    def open_camera_detail(self, camera_id: str) -> None:
+        context = self._controller.get_camera(camera_id)
+        name = context.camera_model.camera_name if context else camera_id
+        self._registry.open(
+            WindowID.CAMERA_DETAIL,
+            instance_key=camera_id,
+            camera_id=camera_id,
+            camera_name=name,
+        )
 
-    def _on_calibration_closed(self) -> None:
-        if self._calibration_window is not None:
-            self._calibration_window.stop_polling()
-        self._calibration_window = None
+    def close_camera_detail(self, camera_id: str) -> None:
+        self._registry.close(WindowID.CAMERA_DETAIL, instance_key=camera_id)
 
-    def _open_observation(self) -> None:
-        from gui.observer.observer_window import ObserverWindow
+    def close_all_windows(self) -> None:
+        self._registry.close_all()
 
-        if self._observation_window is None:
-            self._observation_window = ObserverWindow(self._controller)
-            self._observation_window.camera_detail_requested.connect(self._open_camera_detail)
-            self._observation_window.destroyed.connect(self._on_observation_closed)
-            for ctx in self._controller.get_all_cameras():
-                self._observation_window.add_camera(ctx)
+    # ---------------------------------------------------------
+    # Window Signal Handling
+    # ---------------------------------------------------------
 
-        self._observation_window.show()
-        self._observation_window.raise_()
-        self._observation_window.start_polling()
+    def _on_camera_detail_dev_requested(self) -> None:
+        self.open_camera_detail(self.DEV_CAMERA_ID)
 
-    def _on_observation_closed(self) -> None:
-        if self._observation_window is not None:
-            self._observation_window.stop_polling()
-        self._observation_window = None
-
-    def _open_camera_detail(self, camera_id: str) -> None:
-        from gui.camera_detail_window import CameraDetailWindow
-
-        if camera_id in self._camera_detail_windows:
-            w = self._camera_detail_windows[camera_id]
-            if w is not None:
-                try:
-                    w.show()
-                    w.raise_()
-                    return
-                except RuntimeError:
-                    pass
-
-        ctx = self._controller.get_camera(camera_id)
-        name = ctx.camera_model.camera_name if ctx else camera_id
-
-        detail = CameraDetailWindow(camera_id, name, self._controller)
-        detail.setAttribute(Qt.WA_DeleteOnClose)
-        detail.destroyed.connect(lambda: self._camera_detail_windows.pop(camera_id, None))
-        self._camera_detail_windows[camera_id] = detail
-
-        detail.show()
-        detail.start_polling()
+    def _on_cameras_disconnected(self, camera_ids: list) -> None:
+        for camera_id in camera_ids:
+            self.close_camera_detail(camera_id)
 
     def _on_discover_requested(self) -> None:
         self._discover_and_register_cameras()
@@ -212,13 +264,15 @@ class Application:
 
                 self._controller.add_camera(context)
 
-                self._window.add_camera(
-                    camera_id,
-                    model.camera_name,
-                    model.serial_number,
-                    model.ip_address,
-                    model.model,
-                )
+                main_window = self.window
+                if main_window is not None:
+                    main_window.add_camera(
+                        camera_id,
+                        model.camera_name,
+                        model.serial_number,
+                        model.ip_address,
+                        model.model,
+                    )
 
                 print(
                     f"[INFO] Registered camera: "
@@ -237,26 +291,14 @@ class Application:
     # ---------------------------------------------------------
 
     def show(self) -> None:
-        self._window.show()
+        self.open_main()
 
     # ---------------------------------------------------------
     # Shutdown
     # ---------------------------------------------------------
 
     def shutdown(self) -> None:
-        if self._calibration_window is not None:
-            self._calibration_window.stop_polling()
-            self._calibration_window.close()
-        if self._observation_window is not None:
-            self._observation_window.stop_polling()
-            self._observation_window.close()
-        for cid, w in list(self._camera_detail_windows.items()):
-            try:
-                w.stop_polling()
-                w.close()
-            except RuntimeError:
-                pass
-        self._camera_detail_windows.clear()
+        self.close_all_windows()
         self._controller.shutdown()
 
     # ---------------------------------------------------------

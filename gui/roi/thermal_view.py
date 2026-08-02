@@ -3,6 +3,17 @@ from __future__ import annotations
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel
 
+from gui.theme import (
+    COLOR_BORDER,
+    COLOR_PANEL,
+    COLOR_TEXT_SECONDARY,
+)
+
+PLACEHOLDER_TEXT = (
+    "No Camera Connected\n\n"
+    "Connect a camera from\nthe Main Window"
+)
+
 
 class ThermalView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -13,9 +24,12 @@ class ThermalView(QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
 
-        self._placeholder = QLabel("No camera feed")
+        self._placeholder = QLabel(PLACEHOLDER_TEXT)
         self._placeholder.setAlignment(Qt.AlignCenter)
-        self._placeholder.setStyleSheet("color: #666666; font-size: 14px;")
+        self._placeholder.setStyleSheet(
+            f"color: {COLOR_TEXT_SECONDARY}; font-size: 14px; "
+            f"background-color: {COLOR_PANEL}; border: 1px solid {COLOR_BORDER};"
+        )
         self._layout.addWidget(self._placeholder)
 
     def create_window(self, width: int, height: int) -> None:
@@ -39,6 +53,7 @@ class ThermalView(QWidget):
     def display_image(self, image: object) -> None:
         if self._window_handle is None:
             return
+        self._placeholder.hide()
         try:
             import halcon as ha
             ha.disp_obj(image, self._window_handle)

@@ -80,6 +80,8 @@ class CameraDetailWindow(QWidget):
     def __init__(self, camera_id: str, camera_name: str, controller: ApplicationController, parent=None) -> None:
         super().__init__(parent)
 
+        self.setAttribute(Qt.WA_DeleteOnClose)
+
         self._camera_id = camera_id
         self._camera_name = camera_name
         self._controller = controller
