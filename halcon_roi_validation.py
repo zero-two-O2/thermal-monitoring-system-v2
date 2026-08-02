@@ -19,10 +19,8 @@ No ROI subsystem code is used.
 from __future__ import annotations
 
 import sys
-import time
 import traceback
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import cv2
@@ -31,7 +29,6 @@ from PyQt5.QtCore import QObject, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QCloseEvent, QColor
 from PyQt5.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QFrame,
     QGroupBox,

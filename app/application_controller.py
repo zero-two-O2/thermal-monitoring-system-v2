@@ -438,7 +438,6 @@ class ApplicationController:
         frame = context.get_latest_frame()
         if frame is None:
             return None
-        #return context.processing_pipeline.process(
         return context.process_latest_frame(
             frame,
             context.current_position,

@@ -1,3 +1,19 @@
+## 2026-08-02 18:30
+### What changed
+- Dead code cleanup: removed 30 unused files (~347 lines) and 9 empty placeholder packages (`alarms/`, `core/`, `database/`, `recorder/`, `camera/workers/`, `camera/configuration/`, `camera/discovery/`, `processing/overlays/`, `processing/statistics/`).
+- Removed unused imports flagged by ruff F401 across 5 files, and a commented-out dead line in `app/application_controller.py`.
+- Added `docs/DELETION_LOG.md` documenting every removal with verification notes.
+### Why
+- Reduce codebase clutter and maintenance surface; remove technical debt left from earlier development iterations (empty placeholders, superseded stubs, and an unused DB-backed camera-config module).
+### Notes
+- All deletions were verified to have zero references (AST import analysis + full grep across `.py`/YAML/JSON). Tests: 79 passed, 2 pre-existing failures unchanged. HALCON license error (#2021) blocks GUI/ROI test collection in dev environment.
+- `previous_camera_connection/` and the legacy `camera/tv46l_camera.py` were deliberately KEPT (archived reference / in-progress migration).
+### Files Changed
+- 30 files deleted (see `docs/DELETION_LOG.md`)
+- camera/services/tv46l_camera.py, camera/tv46l_camera.py, configuration/settings.py, halcon_roi_validation.py, processing/roi_processor.py (unused imports)
+- app/application_controller.py (removed commented-out line)
+- docs/DELETION_LOG.md (new)
+
 ## 2026-08-02 14:30
 ### What changed
 - Enforced strict window hierarchy: Main → {Calibration, Observation}, Observation → Camera Detail only.

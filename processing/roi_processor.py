@@ -20,7 +20,6 @@ from processing.models.roi_models import (
     ROIResult,
     ROIType,
     ROIStatistics,
-    AlarmCondition,
 )
 from processing.models.processing_models import (
     ProcessedFrame,

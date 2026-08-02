@@ -20,12 +20,10 @@ This class DOES NOT perform:
 """
 
 from __future__ import annotations
-import sys
 import threading
 import time
 from datetime import datetime
 import halcon as ha
-import numpy as np
 from camera.camera_info import CameraInfo
 from configuration.settings import Settings
 from processing.models.processing_models import RawFrame

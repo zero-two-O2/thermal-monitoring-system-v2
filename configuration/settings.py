@@ -4,7 +4,7 @@ settings.py
 Contains all configurable settings for the application.
 Edit this file to change application behaviour.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 @dataclass(slots=True)
