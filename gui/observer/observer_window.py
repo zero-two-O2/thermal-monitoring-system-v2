@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QCloseEvent
 from PyQt5.QtWidgets import (
     QGridLayout,
@@ -91,6 +91,7 @@ class _AlarmTableWidget(QTableWidget):
 
 
 class ObserverWindow(QMainWindow):
+    camera_detail_requested = pyqtSignal(str)
     POLL_INTERVAL_MS = 33
 
     def __init__(self, controller: ApplicationController) -> None:
@@ -236,20 +237,8 @@ class ObserverWindow(QMainWindow):
     # ---------------------------------------------------------
 
     def _on_tile_double_clicked(self, camera_id: str) -> None:
-        from gui.camera_detail_window import CameraDetailWindow
-        context = None
-        for c in self._cameras:
-            if c.camera_id == camera_id:
-                context = c
-                break
-        if context is None:
-            return
-        win = CameraDetailWindow(
-            camera_id=camera_id,
-            camera_name=context.camera_model.camera_name,
-            controller=self._controller,
-        )
-        win.show()
+        if any(c.camera_id == camera_id for c in self._cameras):
+            self.camera_detail_requested.emit(camera_id)
 
     # ---------------------------------------------------------
     # Frame Polling

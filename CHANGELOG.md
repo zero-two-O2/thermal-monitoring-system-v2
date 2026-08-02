@@ -1,3 +1,19 @@
+## 2026-08-02 14:30
+### What changed
+- Enforced strict window hierarchy: Main → {Calibration, Observation}, Observation → Camera Detail only.
+- Removed `MainWindow.camera_detail_requested` signal, camera-table double-click handler, and its wiring in `Application`.
+- `ObserverWindow` now emits `camera_detail_requested(camera_id)` on tile double-click instead of constructing `CameraDetailWindow` directly; `Application` owns all detail windows (single tracked lifecycle, reuse, shutdown cleanup).
+### Why
+- Detailed View was reachable from the Main Window (camera table double-click), violating the intended navigation flow; also had two divergent detail-window lifecycles (Application-tracked vs. untracked ObserverWindow instances, which `shutdown()` could not close).
+### Notes
+- `Application` is now the sole window manager: create/destroy/show/raise/track for all four windows.
+- No GUI window instantiates another GUI window; verify by grepping for window constructors inside `gui/`.
+- HALCON license expired in dev environment (error #2021, system clock) — GUI tests requiring `gui.roi` cannot run locally.
+### Files Changed
+- gui/main_window.py
+- gui/observer/observer_window.py
+- app/application.py
+
 ## 2026-07-29
 ### What changed
 - Created standalone HALCON ROI validation tool (`halcon_roi_validation.py`).

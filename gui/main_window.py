@@ -101,7 +101,6 @@ class _ConnectionBadge(QLabel):
 class MainWindow(QMainWindow):
     calibration_requested = pyqtSignal()
     observation_requested = pyqtSignal()
-    camera_detail_requested = pyqtSignal(str)
     discover_requested = pyqtSignal()
 
     POLL_INTERVAL_MS = 2000
@@ -328,7 +327,6 @@ class MainWindow(QMainWindow):
         self._table.verticalHeader().setVisible(False)
         self._table.setShowGrid(True)
         self._table.setSortingEnabled(True)
-        self._table.itemDoubleClicked.connect(self._on_table_double_click)
         self._table.verticalHeader().setDefaultSectionSize(40)
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
         self._table.setColumnWidth(COL_CHECK, 36)
@@ -525,14 +523,6 @@ class MainWindow(QMainWindow):
 
     def _on_observation(self) -> None:
         self.observation_requested.emit()
-
-    def _on_table_double_click(self, item: QTableWidgetItem) -> None:
-        row = item.row()
-        status_item = self._table.item(row, COL_STATUS)
-        if status_item is not None:
-            camera_id = status_item.data(Qt.UserRole)
-            if camera_id:
-                self.camera_detail_requested.emit(camera_id)
 
     def _on_selection_changed(self) -> None:
         rows = self._table.selectionModel().selectedRows()

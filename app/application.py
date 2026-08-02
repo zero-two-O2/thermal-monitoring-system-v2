@@ -69,7 +69,6 @@ class Application:
     def _wire_window_signals(self) -> None:
         self._window.calibration_requested.connect(self._open_calibration)
         self._window.observation_requested.connect(self._open_observation)
-        self._window.camera_detail_requested.connect(self._open_camera_detail)
         self._window.discover_requested.connect(self._on_discover_requested)
 
     def _open_calibration(self) -> None:
@@ -94,6 +93,7 @@ class Application:
 
         if self._observation_window is None:
             self._observation_window = ObserverWindow(self._controller)
+            self._observation_window.camera_detail_requested.connect(self._open_camera_detail)
             self._observation_window.destroyed.connect(self._on_observation_closed)
             for ctx in self._controller.get_all_cameras():
                 self._observation_window.add_camera(ctx)
