@@ -103,7 +103,6 @@ class MainWindow(QMainWindow):
     observation_requested = pyqtSignal()
     discover_requested = pyqtSignal()
     cameras_disconnected = pyqtSignal(list)
-    camera_detail_dev_requested = pyqtSignal()
 
     POLL_INTERVAL_MS = 2000
     CLOCK_INTERVAL_MS = 1000
@@ -168,16 +167,8 @@ class MainWindow(QMainWindow):
         view_menu = menu_bar.addMenu("View")
         self._menu_calibration = QAction("Calibration Window", self)
         self._menu_observation = QAction("Observation Window", self)
-        self._menu_detail_dev = QAction("Camera Detail (Dev)", self)
-        self._menu_detail_dev.setShortcut("Ctrl+D")
-        self._menu_detail_dev.setToolTip(
-            "Open a camera detail window without a connected camera "
-            "(developer/test mode)."
-        )
         view_menu.addAction(self._menu_calibration)
         view_menu.addAction(self._menu_observation)
-        view_menu.addSeparator()
-        view_menu.addAction(self._menu_detail_dev)
 
         help_menu = menu_bar.addMenu("Help")
         about_action = QAction("About", self)
@@ -495,7 +486,6 @@ class MainWindow(QMainWindow):
         self._menu_refresh.triggered.connect(self._on_refresh)
         self._menu_calibration.triggered.connect(self._on_calibration)
         self._menu_observation.triggered.connect(self._on_observation)
-        self._menu_detail_dev.triggered.connect(self._on_detail_dev)
 
     # ---------------------------------------------------------
     # Actions
@@ -539,9 +529,6 @@ class MainWindow(QMainWindow):
 
     def _on_observation(self) -> None:
         self.observation_requested.emit()
-
-    def _on_detail_dev(self) -> None:
-        self.camera_detail_dev_requested.emit()
 
     def _on_selection_changed(self) -> None:
         rows = self._table.selectionModel().selectedRows()

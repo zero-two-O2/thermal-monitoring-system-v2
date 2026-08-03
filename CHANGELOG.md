@@ -1,3 +1,88 @@
+## 2026-08-03 17:00
+### What changed
+- Upgraded the global HALCON Python interface to match the installed runtime: `mvtec-halcon` 24112.0.0 → 24113.0.0 (global Python only; venv and HALCON runtime untouched).
+- The `Wrong interface package version` warning no longer appears on `import halcon`.
+- Updated `docs/DevelopmentEnvironment.md` (interface version, mismatch section replaced with resolution note).
+### Why
+- Interface/runtime mismatch: "Compatibility is not guaranteed and crashes etc. are possible."
+### Notes
+- Runtime verified unchanged at 24.11.3.0. `tools/check_environment.py`: all checks PASS, exit 0, clean stderr.
+### Files Changed
+- docs/DevelopmentEnvironment.md
+- CHANGELOG.md
+
+## 2026-08-03 18:10
+### What changed
+- Added the production ROI engine facade `roi_engine/engine.py`: per-camera `ROIEngine` (load_position → immutable store snapshot with bumped generation, process_frame with cache rebuild + HALCON statistics + never-crash exception safety, invalidate, get_runtime_statistics legacy view, memory_bytes, clear) and `ROIEnginePool` (camera_id → engine registry).
+- Added `tests/test_roi_engine.py` (11 tests): batch processing, statistic values, multi-camera independence, pool lifecycle, guards, generation rebuild, invalidate, runtime-statistics compatibility, legacy JSON repository round-trip, clear().
+### Why
+- Public facade of the new type-array ROI engine (parallel build); backward compatible with `roi.runtime.RuntimeROIStatistics` and legacy JSON persistence.
+### Notes
+- The store package modules (build_store, ROIStore, type stores) were implemented in this session because the parallel store agent had not delivered after ~30 min; they follow the same documented contract and can be overwritten by the parallel implementation.
+- Verified: ruff clean, `pytest tests/test_roi_engine.py` 11/11 pass, `from roi_engine import ROIEngine, ROIEnginePool` OK.
+### Files Changed
+- roi_engine/engine.py (new)
+- roi_engine/store/factory.py (new)
+- roi_engine/store/roi_store.py (new)
+- roi_engine/store/rectangle1_store.py (new)
+- roi_engine/store/rectangle2_store.py (new)
+- roi_engine/store/circle_store.py (new)
+- roi_engine/store/ellipse_store.py (new)
+- roi_engine/store/polygon_store.py (new)
+- tests/test_roi_engine.py (new)
+- CHANGELOG.md
+
+## 2026-08-03 16:30
+### What changed
+- Repaired the development environment (no project code changed):
+  - Fixed corrupted venv-local pip (missing `pip-*.dist-info`): removed the broken `pip` folder and reinstalled (now pip 26.2 in the venv).
+  - Installed `debugpy==1.8.21` into the venv — VS Code previously used the extension-bundled debugger, which crashed with `KeyboardInterrupt` inside pydevd tracing during the NumPy import at startup.
+  - Added `.vscode/launch.json` + `.vscode/settings.json` pinning the venv interpreter.
+  - Added `tools/check_environment.py` (interpreter, versions, PASS/FAIL for halcon/numpy/cv2/PyQt5/PyQt6/debugpy/pytest/ruff).
+  - Added `requirements-dev.txt` (venv-local packages only) and `docs/Development_Setup.md` + `docs/DevelopmentEnvironment.md` (audit report).
+- Verified: `check_environment.py` all PASS; app launches under `python -m debugpy --listen` and survives startup (previously crashed on the numpy import).
+### Why
+- Development environment was unhealthy: broken pip, no local debugpy, unstable VS Code debugging, undocumented dependencies.
+### Notes
+- Known remaining issue (documented): global `mvtec-halcon` 24112 vs installed HALCON runtime 24.11.3 — emits a version-mismatch warning. Recommended fix: `pip install --upgrade mvtec-halcon==24113` (global Python, outside the venv).
+- Project constraint preserved: venv keeps `include-system-site-packages = true`; HALCON stays global-only.
+### Files Changed
+- .vscode/launch.json (new)
+- .vscode/settings.json (new)
+- tools/check_environment.py (new)
+- requirements-dev.txt (new)
+- docs/Development_Setup.md (new)
+- docs/DevelopmentEnvironment.md (new)
+- CHANGELOG.md
+
+## 2026-08-03 09:00
+### What changed
+- Camera detail window now opens ONLY by double-clicking a camera tile in the Observation window.
+- Wired `ObserverWindow.camera_detail_requested` → `Application.open_camera_detail` (guarded via a WeakSet so the singleton observation window is wired once). Previously the signal was emitted but never connected, so tile double-click did nothing.
+- Removed the only other entry point: the hidden "Camera Detail (Dev)" menu item / Ctrl+D shortcut in `MainWindow` (`camera_detail_dev_requested` signal, `_on_detail_dev`, `_menu_detail_dev`) and the Application's `DEV_CAMERA_ID` / `_on_camera_detail_dev_requested`.
+- Fixed 2 window-architecture tests that created windows but never called `show()`, so `isVisible()` asserts were wrong (these tests got un-skipped once HALCON import worked).
+### Why
+- Requirement: the detailed camera window should be reachable only from an observation tile double-click, never from the main window.
+### Notes
+- `tests/test_window_architecture.py`: 28 passed (incl. new `test_observation_tile_double_click_opens_detail`). Full suite: 401 passed; remaining failures are all HALCON license error #2021 (environment, being fixed on the HALCON side) — none related to this change.
+### Files Changed
+- gui/main_window.py
+- app/application.py
+- tests/test_window_architecture.py
+- CHANGELOG.md
+
+## 2026-08-03 00:00
+### What changed
+- Made the HALCON `set_system("clip_region", "false")` call in `roi/geometry_to_hregion.py` non-fatal. It previously ran at module import time, so any HALCON failure (e.g. license error #2021) crashed the entire `roi` import and blocked opening the calibration window.
+- The call is now deferred to a guarded `_configure_clip_region()` helper invoked lazily on first conversion; failures are logged and retried on the next conversion instead of breaking imports.
+### Why
+- Import-time HALCON calls make the whole app brittle: one HALCON-side error took down the calibration window and every module that imports `roi`.
+### Notes
+- Verified `import roi` and `import gui.calibration.calibration_window` pass with the current HALCON error active (it is now logged as a warning, not fatal).
+### Files Changed
+- roi/geometry_to_hregion.py
+- CHANGELOG.md
+
 ## 2026-08-02 19:45
 ### What changed
 - Added `WindowRegistry` (`app/window_registry.py`): single owner of all top-level windows with `WindowID` keys, `(id, instance_key)` addressing (one camera-detail window per camera), open/reuse/show/raise semantics, `on_open`/`on_close` lifecycle hooks, and auto-forget on external close via `destroyed` (`Qt.WA_DeleteOnClose`).
@@ -905,3 +990,19 @@
 ### Notes
 - 342 tests pass (6 pre-existing HALCON failures unchanged).
 - Zero regressions across all ROI GUI, persistence, alarm, editor, phase2, and integration tests.
+
+## 2026-08-03 19:05
+### What changed
+- Verified and fixed the roi_engine batch pipeline (masks.py, region_cache.py, statistics_engine.py) plus two HALCON-backed test suites (tests/test_region_cache.py, tests/test_statistics_batch.py): 16/16 tests pass, ruff clean.
+- Corrected the rotated-rectangle mask: HALCON gen_rectangle2 puts length1 along the (-sin phi, cos phi) axis (verified at phi=0: 21x61 region), so the mask is now a polygon fill of the four corners in perimeter order (l1,l2), (l1,-l2), (-l1,-l2), (-l1,l2); the previous order emitted a bow-tie (area 1867 vs 3672).
+- Ellipse mask uses 2x2 supersampling (max 2.4% area deviation), polygon mask 4x4; hotspot search now dilates the mask by one pixel (8-connectivity) and discards pixels hotter than the HALCON maximum, guaranteeing the hotspot pixel carries the exact region maximum.
+- Legacy reference comparisons required plain Python floats (legacy HALCON calls reject numpy.float64).
+### Why
+- Task-spec rect2 convention was wrong; approximate masks dropped boundary pixels HALCON includes, which broke hotspot-exactness for corner maxima.
+### Notes
+- HALCON rect2 rasterization == gen_region_polygon_filled of its corners (1081 vs 1083 px). Probe scripts (temp) deleted; store subclasses from the parallel agent are still pending (conftest falls back to direct file loading).
+### Files Changed
+- roi_engine/masks.py
+- roi_engine/statistics_engine.py
+- tests/test_region_cache.py
+- tests/test_statistics_batch.py

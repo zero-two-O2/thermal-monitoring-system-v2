@@ -39,14 +39,13 @@ class Application:
         - WindowRegistry (single owner of every window)
     """
 
-    DEV_CAMERA_ID = "dev_cam_1"
-
     def __init__(self) -> None:
 
         self._qt_app = QApplication.instance() or QApplication(sys.argv)
         self._controller = ApplicationController()
         self._registry = WindowRegistry()
         self._wired_main_windows: weakref.WeakSet = weakref.WeakSet()
+        self._wired_observation_windows: weakref.WeakSet = weakref.WeakSet()
 
         self._register_windows()
         self.open_main()
@@ -114,12 +113,12 @@ class Application:
         main_window.calibration_requested.connect(self.open_calibration)
         main_window.observation_requested.connect(self.open_observation)
         main_window.discover_requested.connect(self._on_discover_requested)
-        main_window.camera_detail_dev_requested.connect(
-            self._on_camera_detail_dev_requested
-        )
         main_window.cameras_disconnected.connect(self._on_cameras_disconnected)
 
     def _populate_observation_window(self, window) -> None:
+        if window not in self._wired_observation_windows:
+            self._wired_observation_windows.add(window)
+            window.camera_detail_requested.connect(self.open_camera_detail)
         for context in self._controller.get_all_cameras():
             window.add_camera(context)
 
@@ -175,9 +174,6 @@ class Application:
     # ---------------------------------------------------------
     # Window Signal Handling
     # ---------------------------------------------------------
-
-    def _on_camera_detail_dev_requested(self) -> None:
-        self.open_camera_detail(self.DEV_CAMERA_ID)
 
     def _on_cameras_disconnected(self, camera_ids: list) -> None:
         for camera_id in camera_ids:

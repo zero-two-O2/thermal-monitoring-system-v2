@@ -30,6 +30,7 @@ Error handling
 
 from __future__ import annotations
 
+import logging
 
 import halcon as ha
 
@@ -42,10 +43,32 @@ from roi.geometry import (
     PolygonROI,
 )
 
-# Disable region clipping so standalone region generation works
-# even when no image has been read yet. By default HALCON clips
-# regions to the last-read image dimensions (silent empty region).
-ha.set_system("clip_region", "false")
+_logger = logging.getLogger(__name__)
+
+_clip_region_configured = False
+
+
+def _configure_clip_region() -> None:
+    """Disable region clipping so standalone region generation works.
+
+    HALCON clips regions to the last-read image dimensions by default,
+    which silently produces empty regions when no image has been read.
+
+    The HALCON call is deferred and never allowed to break module import:
+    if it fails (transient license/environment issue), the failure is logged
+    and retried on the next conversion.
+    """
+    global _clip_region_configured
+    if _clip_region_configured:
+        return
+    try:
+        ha.set_system("clip_region", "false")
+        _clip_region_configured = True
+    except Exception:
+        _logger.warning(
+            "Failed to set HALCON clip_region=false; will retry on next conversion.",
+            exc_info=True,
+        )
 
 
 def geometry_to_hregion(geometry: ROIGeometry) -> ha.HObject:
@@ -70,6 +93,7 @@ def geometry_to_hregion(geometry: ROIGeometry) -> ha.HObject:
     TypeError
         If the geometry type is not supported.
     """
+    _configure_clip_region()
     geometry.validate()
 
     if isinstance(geometry, Rectangle1ROI):

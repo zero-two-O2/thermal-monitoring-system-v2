@@ -195,11 +195,9 @@ class TestNoCameraMode:
         received: list[str] = []
         window.calibration_requested.connect(lambda: received.append("cal"))
         window.observation_requested.connect(lambda: received.append("obs"))
-        window.camera_detail_dev_requested.connect(lambda: received.append("dev"))
         window._on_calibration()
         window._on_observation()
-        window._on_detail_dev()
-        assert received == ["cal", "obs", "dev"]
+        assert received == ["cal", "obs"]
         window.close()
 
     @requires_halcon
@@ -208,6 +206,7 @@ class TestNoCameraMode:
         from gui.calibration.calibration_window import CalibrationWindow
 
         window = CalibrationWindow(ApplicationController())
+        window.show()
         window.refresh_camera_list()
         # Camera selector remains visible with a placeholder entry.
         assert window._camera_combo.count() == 1
@@ -250,7 +249,8 @@ class TestNoCameraMode:
         from gui.camera_detail_window import CameraDetailWindow
 
         window = CameraDetailWindow("dev_cam_1", "dev_cam_1", ApplicationController())
-        assert window.isVisible() is False
+        window.show()
+        assert window.isVisible()
         assert window._thermal_view._placeholder.isVisible()
         # Polling without a registered camera must not crash.
         window._poll()
@@ -338,13 +338,22 @@ class TestApplicationNavigation:
         application.shutdown()
 
     @requires_halcon
-    def test_dev_shortcut_opens_detail(self, qapp):
+    def test_observation_tile_double_click_opens_detail(self, qapp):
+        from camera.factory.camera_factory import CameraFactory
+        from camera.models.camera_model import CameraModel
         from app.window_registry import WindowID
 
         application = self._make_application(qapp)
-        application.window.camera_detail_dev_requested.emit()
+        context = CameraFactory().create_camera(
+            CameraModel(camera_id="cam_a", camera_name="Camera A")
+        )
+        application.controller.add_camera(context)
+        application.open_observation()
+        observation = application.registry.get(WindowID.OBSERVATION)
+        slot = observation._slot_map["cam_a"]
+        observation._tiles[slot].double_clicked.emit("cam_a")
         assert application.registry.is_open(
-            WindowID.CAMERA_DETAIL, instance_key=application.DEV_CAMERA_ID
+            WindowID.CAMERA_DETAIL, instance_key="cam_a"
         )
         application.shutdown()
 
