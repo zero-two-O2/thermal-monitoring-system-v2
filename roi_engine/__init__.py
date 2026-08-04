@@ -15,6 +15,7 @@ Public API
 ----------
     ROIEngine                — per-camera engine facade (multi-camera ready)
     ROIEnginePool            — camera_id -> ROIEngine registry
+    ROIEngineManager         — GUI-facing adapter (runtime manager facade)
     ROIStore / build_store   — immutable type-array configuration snapshot
     StatisticsEngine         — pure batch HALCON statistics (no GUI/Qt/window)
     RegionCache              — per-type cached HALCON region tuples
@@ -25,6 +26,7 @@ Public API
 from __future__ import annotations
 
 from roi_engine.engine import ROIEngine, ROIEnginePool
+from roi_engine.integration import ROIEngineManager
 from roi_engine.masks import MaskCache
 from roi_engine.region_cache import RegionCache
 from roi_engine.runtime import FrameStats, RuntimeStatsArrays, TypeFrameStats
@@ -44,6 +46,7 @@ __all__ = [
     "StatisticsEngine",
     "ROIEngine",
     "ROIEnginePool",
+    "ROIEngineManager",
     "FrameStats",
     "TypeFrameStats",
     "RuntimeStatsArrays",

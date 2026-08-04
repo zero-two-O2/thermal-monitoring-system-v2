@@ -8,12 +8,14 @@ from PyQt5.QtCore import QObject
 from utilities import logger
 
 from alarm.manager import AlarmManager
+from configuration.settings import Settings
 from roi.acquisition_state import AcquisitionState
 from roi.configuration import ROIConfiguration
 from roi.editor.editor_manager import ROIEditorManager
 from roi.persistence.repository import JSONROIRepository
 from roi.runtime import RuntimeROIStatistics
-from roi.runtime_manager import RuntimeROIManagerImpl
+from roi_engine.engine import ROIEnginePool
+from roi_engine.integration import ROIEngineManager
 
 from gui.roi.roi_dirty_tracker import ROIDirtyTracker, ROIDirtyType
 from gui.roi.roi_selection_manager import ROISelectionManager
@@ -38,7 +40,9 @@ class ROIWorkspace(QObject):
         self._dirty_tracker = dirty_tracker
         self._editor_manager = editor_manager
 
-        self._runtime_managers: dict[str, RuntimeROIManagerImpl] = {}
+        self._runtime_managers: dict[str, ROIEngineManager] = {}
+        self._engine_pool = ROIEnginePool()
+        self._dual_validation = Settings().ROI_ENGINE_DUAL_VALIDATION
         self._alarm_manager = AlarmManager(on_event=on_alarm_event)
         self._active_camera_id: str | None = None
         self._current_state: AcquisitionState | None = None
@@ -47,7 +51,7 @@ class ROIWorkspace(QObject):
         self._connect_signals()
 
     @property
-    def runtime_manager(self) -> RuntimeROIManagerImpl:
+    def runtime_manager(self) -> ROIEngineManager:
         return self._get_or_create_manager(self._active_camera_id or "")
 
     @property
@@ -62,18 +66,23 @@ class ROIWorkspace(QObject):
     def active_camera_id(self) -> str | None:
         return self._active_camera_id
 
-    def _get_or_create_manager(self, camera_id: str) -> RuntimeROIManagerImpl:
+    def _get_or_create_manager(self, camera_id: str) -> ROIEngineManager:
         if camera_id not in self._runtime_managers:
-            self._runtime_managers[camera_id] = RuntimeROIManagerImpl()
+            self._runtime_managers[camera_id] = ROIEngineManager(
+                engine=self._engine_pool.engine(camera_id),
+                config_provider=lambda rid: self._configs.get(rid),
+                dual_validation=self._dual_validation,
+            )
         return self._runtime_managers[camera_id]
 
-    def get_runtime_manager(self, camera_id: str) -> RuntimeROIManagerImpl | None:
+    def get_runtime_manager(self, camera_id: str) -> ROIEngineManager | None:
         return self._runtime_managers.get(camera_id)
 
     def unload_camera(self, camera_id: str) -> None:
         mgr = self._runtime_managers.pop(camera_id, None)
         if mgr is not None:
             mgr.unload()
+        self._engine_pool.remove(camera_id)
 
     def _connect_signals(self) -> None:
         bus = self._signal_bus
@@ -105,6 +114,20 @@ class ROIWorkspace(QObject):
 
     def get_configuration(self, roi_id: str) -> ROIConfiguration | None:
         return self._configs.get(roi_id)
+
+    def update_configuration(self, config: ROIConfiguration) -> None:
+        """Replace the stored configuration and reload the engine store.
+
+        Called by the property panel write-back path (enabled, visible,
+        style, alarm, recording, name changes). The engine store is
+        immutable, so a changed config object must trigger a fresh
+        snapshot through mark_dirty().
+        """
+        if config.roi_id not in self._configs:
+            return
+        self._configs[config.roi_id] = config
+        mgr = self._get_or_create_manager(self._active_camera_id or "")
+        mgr.mark_dirty(config.roi_id)
 
     def get_all_configurations(self) -> list[ROIConfiguration]:
         return list(self._configs.values())
@@ -176,9 +199,9 @@ class ROIWorkspace(QObject):
             return
         self._editor_manager.delete_editor(roi_id)
         self._alarm_manager.unregister(roi_id)
+        self._configs.pop(roi_id, None)
         mgr = self._get_or_create_manager(self._active_camera_id or "")
         mgr.mark_dirty(roi_id)
-        self._configs.pop(roi_id, None)
         self._selection_manager.deselect(roi_id)
         self._dirty_tracker.mark_deleted(roi_id)
         self._signal_bus.roi_deleted.emit(roi_id)

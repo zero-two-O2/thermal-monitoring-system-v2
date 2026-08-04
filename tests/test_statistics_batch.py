@@ -1,17 +1,9 @@
-"""
-Statistics engine batch tests.
-
-The engine's batch HALCON calls must produce exactly the same numbers
-as the legacy per-ROI loop in roi/statistics.py (same operators, same
-arguments), so the reference here is the legacy path itself.
-"""
-
 from __future__ import annotations
 
 import halcon as ha
 import numpy as np
 
-from conftest import build_test_store, make_config, synthetic_image
+from conftest import make_config, synthetic_image
 from roi.geometry import (
     CircleROI,
     EllipseROI,
@@ -24,7 +16,8 @@ from roi.statistics import extract_statistics
 from roi_engine.masks import MaskCache
 from roi_engine.region_cache import RegionCache
 from roi_engine.statistics_engine import StatisticsEngine
-from roi_engine.types import ROIShape
+from roi_engine.types import ALL_SHAPES, ROIShape
+from roi_engine.store.factory import build_store
 
 
 def _geometry_batch() -> list:
@@ -69,7 +62,7 @@ def _build_env(geoms: list | None = None, enabled_mask: set[int] | None = None):
         make_config(f"roi_{i:03d}", geom, enabled=i in enabled_mask)
         for i, geom in enumerate(geoms)
     ]
-    store = build_test_store(configs)
+    store = build_store("cam_1", "pos_1", configs)
     regions = RegionCache()
     regions.rebuild(store)
     masks = MaskCache()
@@ -81,8 +74,10 @@ def _build_env(geoms: list | None = None, enabled_mask: set[int] | None = None):
 
 def _runtime_for(store, roi_id: str):
     """(type_store, index) for an ROI id."""
-    for shape in store._stores:
+    for shape in ALL_SHAPES:
         type_store = store.store_for(shape)
+        if type_store is None:
+            continue
         if roi_id in type_store.roi_ids:
             return type_store, type_store.roi_ids.index(roi_id)
     raise AssertionError(f"ROI {roi_id} not found in store")
@@ -132,7 +127,10 @@ def test_batch_matches_legacy_exactly() -> None:
     engine = StatisticsEngine()
     results = engine.process(himage, store, regions, masks, frame_id=7, timestamp=1.5)
     assert results
-    for shape, type_store in store._stores.items():
+    for shape in ALL_SHAPES:
+        type_store = store.store_for(shape)
+        if type_store is None:
+            continue
         for i, roi_id in enumerate(type_store.roi_ids):
             if not type_store.enabled[i]:
                 continue
@@ -158,7 +156,10 @@ def test_disabled_rois_are_not_processed() -> None:
     engine = StatisticsEngine()
     results = engine.process(himage, store, regions, masks, frame_id=3, timestamp=0.0)
     assert results
-    for shape, type_store in store._stores.items():
+    for shape in ALL_SHAPES:
+        type_store = store.store_for(shape)
+        if type_store is None:
+            continue
         for i, roi_id in enumerate(type_store.roi_ids):
             run = type_store.runtime
             if type_store.enabled[i]:
@@ -194,7 +195,10 @@ def test_nan_frame_matches_legacy() -> None:
     engine = StatisticsEngine()
     results = engine.process(himage, store, regions, masks, frame_id=5, timestamp=0.0)
     assert results
-    for shape, type_store in store._stores.items():
+    for shape in ALL_SHAPES:
+        type_store = store.store_for(shape)
+        if type_store is None:
+            continue
         for i, roi_id in enumerate(type_store.roi_ids):
             if not type_store.enabled[i]:
                 continue
@@ -237,7 +241,10 @@ def test_hotspot_inside_bbox_and_equals_maximum() -> None:
     engine = StatisticsEngine()
     results = engine.process(himage, store, regions, masks, frame_id=4, timestamp=0.0)
     assert results
-    for shape, type_store in store._stores.items():
+    for shape in ALL_SHAPES:
+        type_store = store.store_for(shape)
+        if type_store is None:
+            continue
         bboxes = type_store.bboxes
         for i, roi_id in enumerate(type_store.roi_ids):
             if not type_store.enabled[i]:
@@ -255,17 +262,22 @@ def test_repeated_frames_are_consistent() -> None:
     store, regions, masks, himage, _ = _build_env()
     engine = StatisticsEngine()
     engine.process(himage, store, regions, masks, frame_id=1, timestamp=1.0)
-    first = {
-        shape: (
+    first: dict = {}
+    for shape in ALL_SHAPES:
+        type_store = store.store_for(shape)
+        if type_store is None:
+            continue
+        first[shape] = (
             type_store.runtime.minimum.copy(),
             type_store.runtime.maximum.copy(),
             type_store.runtime.hotspot_row.copy(),
             type_store.runtime.hotspot_col.copy(),
         )
-        for shape, type_store in store._stores.items()
-    }
     engine.process(himage, store, regions, masks, frame_id=2, timestamp=2.0)
-    for shape, type_store in store._stores.items():
+    for shape in ALL_SHAPES:
+        type_store = store.store_for(shape)
+        if type_store is None:
+            continue
         min0, max0, hr0, hc0 = first[shape]
         np.testing.assert_array_equal(min0, type_store.runtime.minimum)
         np.testing.assert_array_equal(max0, type_store.runtime.maximum)

@@ -280,6 +280,7 @@ class CalibrationWindow(QMainWindow):
         roi_property.appearance_changed.connect(signal_bus.roi_appearance_changed.emit)
         roi_property.recording_changed.connect(signal_bus.roi_recording_changed.emit)
         roi_property.rename_requested.connect(lambda rid, name: signal_bus.roi_renamed.emit(rid))
+        roi_property.config_updated.connect(self._roi_workspace.update_configuration)
 
         signal_bus.roi_created.connect(self._on_roi_created)
         signal_bus.roi_deleted.connect(lambda rid: roi_list.remove_row(rid))

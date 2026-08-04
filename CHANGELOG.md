@@ -1,3 +1,79 @@
+## 2026-08-04 16:10
+### What changed
+- Fixed a Phase 4 data-flow bug: the ROI property panel never wrote config edits back, so enabled/visible/alarm/recording/name toggles never reached the immutable engine store. Added `ROIWorkspace.update_configuration(config)` (replaces the stored config + `mark_dirty` store reload) and `ROIPropertyPanel.config_updated` (emits replaced configs from all edit handlers); `CalibrationWindow` wires the two.
+- Added the production validation harness `tests/validation/` (CLI `python -m tests.validation`): soak, dual validation (1000+ frames), position switch, camera switch, ROI editing matrix, high ROI counts (up to 1600), error recovery; cv2 charts, JSON/CSV/Markdown reports, PASS/FAIL/SKIPPED verdicts.
+- 14 harness tests in `tests/test_validation_harness.py`, including regression tests pinning the config write-back path.
+### Why
+- Validation scenarios (hide/disable/delete) exposed that appearance edits never reached the engine; narrow fix so the engine store reloads on every edit, without touching engine/store internals.
+### Notes
+- Synthetic scene contains per-frame noise (~0.05 °C), so stale-cache checks use a 1.0 °C tolerance.
+- `ha.info_framegrabber("GigEVision2", "info_boards")` returns `(_info, boards)` (2-tuple); `camera.models` must be imported before `camera.services.tv46l_camera` (circular import); `CameraManager` has no `clear()`.
+- Harness tests: 14/14 pass (short synthetic runs). Camera-mode scenarios (soak/camera_switch) still require hardware.
+### Files Changed
+- gui/roi/roi_workspace.py
+- gui/roi/roi_property_panel.py
+- gui/calibration/calibration_window.py
+- tests/validation/ (new: __init__.py, metrics.py, charts.py, report.py, frame_source.py, camera_bootstrap.py, harness.py, scenarios.py, __main__.py)
+- tests/test_validation_harness.py (new)
+- CHANGELOG.md
+
+## 2026-08-04 14:30
+### What changed
+- Integrated the production ROI engine into the Calibration Window (Phase 3, pilot). Added `roi_engine/integration.py`: `ROIEngineManager`, a backward-compatible facade over `ROIEngine`/`ROIEnginePool` with the same API as the legacy `RuntimeROIManagerImpl` (load, add_configuration, unload, get_active, mark_dirty, rebuild_dirty_regions, process_frame, ...).
+- `gui/roi/roi_workspace.py` now creates one `ROIEngineManager` per camera (pooled engine) instead of `RuntimeROIManagerImpl`; the workspace config dict is passed as a config provider so edits/deletes reload the store snapshot. `_on_delete_roi` pops the config before `mark_dirty`.
+- Added `Settings.ROI_ENGINE_DUAL_VALIDATION` (default False): when on, the legacy manager runs in parallel per frame and mismatches (min/max/mean/std/area/hotspot/valid) log one warning per ROI until they recover. Hotspot positions may differ by a few pixels on max plateaus (engine = first max pixel, legacy = plateau center) — tolerated up to 16 px.
+- Fixed (vs legacy): geometry edits now reach statistics immediately; legacy kept the pre-edit geometry in its RuntimeROI objects.
+- Added `tests/test_roi_engine_integration.py` (17 tests) and `docs/ROI_Engine_Integration_Report.md` (summary, architecture, validation, regression, go/no-go).
+### Why
+- Pilot rollout of the batched engine behind the Calibration Window without changing GUI behavior.
+### Notes
+- Full suite: 504 passed, 8 failed — the 8 are the same pre-existing legacy/HALCON-24.11 failures (verified earlier via git stash); no new failures. Ruff clean on all touched files.
+- `Settings` is slots=True: read the new flag from a `Settings()` instance — class-level access returns the member descriptor (truthy).
+### Files Changed
+- roi_engine/integration.py (new)
+- roi_engine/__init__.py
+- gui/roi/roi_workspace.py
+- configuration/settings.py
+- tests/test_roi_engine_integration.py (new)
+- docs/ROI_Engine_Integration_Report.md (new)
+- CHANGELOG.md
+
+## 2026-08-04 13:30
+### What changed
+- Cleaned `tests/conftest.py`: removed the parallel-build stub machinery (`_ensure_roi_engine_modules`, `_TypeStore`, `_ROIStore`, `_attach_geometry`, `build_test_store`); only shared helpers `make_config` and `synthetic_image` remain.
+- Rewired `tests/test_region_cache.py` and `tests/test_statistics_batch.py` onto the real store: `build_store("cam_1", "pos_1", configs, generation=...)` and per-shape iteration via `store_for(shape)` / `ALL_SHAPES` (16 call sites fixed).
+- Added `tests/test_roi_store.py` (11 tests): store immutability, enabled_indices, per-type arrays, memory_bytes, multi-camera independence, generation.
+- Added `docs/ROI_Architecture.md` (mermaid diagrams: architecture, data flow, class relationships; old-vs-new table; scalability analysis; go/no-go recommendation).
+### Why
+- The roi_engine store package is committed, so the test suites no longer need stubs; tests must exercise the production store.
+### Notes
+- roi_engine suites: 38/38 pass; ruff clean on all touched files. Full suite: 487 passed, 8 failed — the 8 are PRE-EXISTING legacy failures (test_processing_pipeline alarm-active, test_roi_phase2 HALCON-area/`halcon.HRegion`), verified by stashing this work and re-running: identical failures on the committed baseline (HALCON 24.11 rasterization). Not caused by roi_engine.
+- Benchmark caveat (from report): timings taken under ~100% external CPU load; batched engine ~2x slower than clean-machine probes; ratios/scaling representative.
+### Files Changed
+- tests/conftest.py
+- tests/test_region_cache.py
+- tests/test_statistics_batch.py
+- tests/test_roi_store.py (new)
+- docs/ROI_Architecture.md (new)
+- CHANGELOG.md
+
+## 2026-08-04 13:00
+### What changed
+- Added `tests/benchmark_roi_pipeline.py`: CLI benchmark of the batched `roi_engine` pipeline vs the legacy per-ROI path. Flags: `--counts`, `--frames`, `--no-legacy`, `--json out.json`, `--report`.- Mixed-shape synthetic geometry (50/20/10/10/10 % Rectangle1/Circle/Ellipse/Rectangle2/Polygon) on a deterministic non-overlapping 480x640 grid (seed 42); correctness spot-check vs legacy `extract_statistics` (1e-6, NaN-safe); per-frame allocation via tracemalloc; budget line 9 FPS = 111 ms.
+- Benchmark report generated at `docs/benchmarks/ROI_Benchmark_Report.md` + raw results `ROI_Benchmark_raw_results.json`.
+- Results (median per frame, machine under ~100% external CPU load): 50 ROIs 8.3 ms (legacy 31.6 ms), 100: 13.5 (44.5), 250: 22.9 (82.3), 500: 32.6 (146.3), 1000: 87.7 (337.2), 1600: 96.7 ms (428.3 ms); speedup 3.3-4.5x, sub-linear scaling (11.6x time for 32x ROIs).
+### Why
+- Quantify the batched engine's scalability and prove correctness against the legacy path before production rollout.
+### Notes
+- Spurious `KeyboardInterrupt` inside HALCON C calls (Windows parallel-operator abort) occurs in bursts; the benchmark retries interrupted frames up to 3x (timing covers only the successful attempt).
+- Absolute timings are inflated by sustained 100% CPU contention (PyCharm/Chrome); report methodology documents the caveat. Legacy per-ROI ~0.27-0.63 ms/ROI matches the expected ballpark; batched engine ~2x slower than clean-machine probes at high counts.
+- `docs/benchmarks/` did not exist; report writer creates it.
+### Files Changed
+- tests/benchmark_roi_pipeline.py (new)
+- docs/benchmarks/ROI_Benchmark_Report.md (new)
+- docs/benchmarks/ROI_Benchmark_raw_results.json (new)
+- CHANGELOG.md
+
 ## 2026-08-03 17:00
 ### What changed
 - Upgraded the global HALCON Python interface to match the installed runtime: `mvtec-halcon` 24112.0.0 → 24113.0.0 (global Python only; venv and HALCON runtime untouched).

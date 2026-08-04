@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QCloseEvent
 from PyQt5.QtWidgets import (
@@ -16,6 +18,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from alarm.events import AlarmEvent
 from app.application_controller import ApplicationController
 from gui.theme import (
     COLOR_ACCENT,
@@ -31,6 +34,10 @@ from gui.theme import (
 )
 
 from gui.widgets.camera_tile import CameraTile
+from observation.overlay import draw_roi_overlays
+from observation.runtime import ObservationRuntime
+
+logger = logging.getLogger(__name__)
 
 
 TILE_COUNT = 8
@@ -73,10 +80,10 @@ class _AlarmTableWidget(QTableWidget):
             self.setItem(row, col, item)
 
         color_style = {
-            "CRITICAL": COLOR_ALARM_RED,
-            "HIGH": COLOR_ALARM_ORANGE,
-            "WARNING": COLOR_ALARM_GREEN,
-            "INFO": COLOR_ALARM_GRAY,
+            "ACTIVE": COLOR_ALARM_RED,
+            "PENDING": COLOR_ALARM_ORANGE,
+            "ACKNOWLEDGED": COLOR_ACCENT,
+            "CLEARED": COLOR_ALARM_GRAY,
         }
         color = color_style.get(level.upper(), COLOR_ALARM_GRAY)
         for col in range(self.columnCount()):
@@ -103,6 +110,11 @@ class ObserverWindow(QMainWindow):
         self._tiles: list[CameraTile] = []
         self._slot_map: dict[str, int] = {}
         self._cameras: list = []
+        self._runtime = ObservationRuntime(
+            repo_base="data/roi",
+            on_alarm_event=self._on_alarm_event,
+        )
+        self._frame_counters: dict[str, int] = {}
 
         self._build_ui()
         self._apply_theme()
@@ -224,6 +236,8 @@ class ObserverWindow(QMainWindow):
 
         self._slot_map[camera_id] = slot_index
         self._cameras.append(context)
+        self._runtime.add_camera(camera_id)
+        self._frame_counters[camera_id] = 0
 
         tile = self._tiles[slot_index]
         tile.assign_camera(camera_id, context.camera_model.camera_name)
@@ -235,6 +249,8 @@ class ObserverWindow(QMainWindow):
         if slot_index is None:
             return
         self._cameras = [c for c in self._cameras if c.camera_id != camera_id]
+        self._frame_counters.pop(camera_id, None)
+        self._runtime.remove_camera(camera_id)
         tile = self._tiles[slot_index]
         tile.clear_camera()
         self._camera_count_label.setText("Cameras: " + str(len(self._cameras)))
@@ -258,6 +274,7 @@ class ObserverWindow(QMainWindow):
         self._poll_timer.stop()
 
     def _poll_frames(self) -> None:
+        total_fps = 0.0
         for context in self._cameras:
             camera_id = context.camera_id
             slot = self._slot_map.get(camera_id)
@@ -270,13 +287,71 @@ class ObserverWindow(QMainWindow):
                 raw = context.camera.get_frame()
                 if raw is None:
                     continue
+                tile.set_connected(bool(context.is_connected))
+
+                position_id = context.position_manager.current_position_id()
+                self._runtime.set_position(camera_id, position_id)
+                tile.set_position(
+                    "Pos " + position_id if position_id is not None else "---"
+                )
+
                 cal = context.camera.get_calibration_manager()
-                display = cal.raw_to_display(raw)
+                temperature = cal.raw_to_temperature(raw)
+                display = cal.temperature_to_display(temperature)
                 rgb = cal.apply_colormap(display)
-                if rgb is not None:
-                    tile.update_frame(image=rgb, frame_count=0, sequence=0, latency_ms=0.0, dropped=0, timeouts=0, fps=0.0)
+                if rgb is None:
+                    continue
+
+                frame_id = self._frame_counters.get(camera_id, 0)
+                self._frame_counters[camera_id] = frame_id + 1
+                stats, results = self._runtime.process_frame(
+                    camera_id, temperature, frame_id=frame_id
+                )
+                active_alarms = {
+                    result.roi_id for result in results if result.active
+                }
+                draw_roi_overlays(
+                    rgb,
+                    self._runtime.active_rois(camera_id),
+                    alarm_roi_ids=active_alarms,
+                )
+
+                fps = self._runtime.fps(camera_id)
+                tile.update_frame(image=rgb, fps=fps)
+                tile.set_alarm(bool(active_alarms))
+                total_fps += fps
             except Exception:
-                pass
+                logger.exception(
+                    "Observation: frame processing failed for camera %s",
+                    camera_id,
+                )
+        self._fps_label.setText("FPS: " + f"{total_fps:.0f}")
+
+    # ---------------------------------------------------------
+    # Alarm Events
+    # ---------------------------------------------------------
+
+    def _on_alarm_event(self, camera_id: str, event: AlarmEvent) -> None:
+        context = self._controller.get_camera(camera_id)
+        camera_name = context.camera_model.camera_name if context else camera_id
+        position_id = self._runtime.position(camera_id) or "---"
+        timestamp = event.timestamp.strftime("%H:%M:%S")
+        self._alarm_table.add_alarm(
+            timestamp=timestamp,
+            camera=camera_name,
+            position=position_id,
+            roi=event.roi_id,
+            level=event.new_state,
+            temperature=f"{event.measured_value:.1f} C",
+        )
+        active_count = sum(
+            alarm_manager.active_count
+            for alarm_manager in (
+                self._runtime.alarm_manager(camera) for camera in self._runtime.cameras()
+            )
+            if alarm_manager is not None
+        )
+        self._alarm_count_label.setText("Alarms: " + str(active_count))
 
     # ---------------------------------------------------------
     # Lifecycle
@@ -284,4 +359,5 @@ class ObserverWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.stop_polling()
+        self._runtime.shutdown()
         event.accept()

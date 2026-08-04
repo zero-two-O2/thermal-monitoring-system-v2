@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
@@ -78,10 +80,12 @@ class ROIPropertyPanel(QWidget):
     appearance_changed = pyqtSignal(str)
     recording_changed = pyqtSignal(str)
     rename_requested = pyqtSignal(str, str)
+    config_updated = pyqtSignal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._current_roi_id: str | None = None
+        self._current_config: ROIConfiguration | None = None
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -229,6 +233,7 @@ class ROIPropertyPanel(QWidget):
 
     def load_roi(self, config: ROIConfiguration) -> None:
         self._current_roi_id = config.roi_id
+        self._current_config = config
         self._no_selection_label.hide()
         self._props_widget.show()
 
@@ -267,6 +272,7 @@ class ROIPropertyPanel(QWidget):
 
     def clear(self) -> None:
         self._current_roi_id = None
+        self._current_config = None
         self._no_selection_label.show()
         self._props_widget.hide()
 
@@ -328,31 +334,81 @@ class ROIPropertyPanel(QWidget):
 
     def _on_name_changed(self) -> None:
         if self._current_roi_id:
+            self._rename_config(name=self._name_edit.text())
             self.rename_requested.emit(self._current_roi_id, self._name_edit.text())
 
     def _on_enabled_changed(self) -> None:
-        self._emit_appearance()
+        self._appearance_config(enabled=self._enabled_check.isChecked())
 
     def _on_visible_changed(self) -> None:
-        self._emit_appearance()
+        self._appearance_config(visible=self._visible_check.isChecked())
 
     def _on_color_changed(self) -> None:
-        self._emit_appearance()
+        self._appearance_config(
+            style=replace(
+                self._current_config.style,
+                color=self._color_edit.text(),
+            )
+        )
 
     def _on_line_width_changed(self) -> None:
-        self._emit_appearance()
+        self._appearance_config(
+            style=replace(
+                self._current_config.style,
+                line_width=int(self._line_width_spin.value()),
+            )
+        )
 
     def _on_alarm_changed(self) -> None:
-        if self._current_roi_id:
-            self.alarm_changed.emit(self._current_roi_id)
+        if self._current_roi_id is None or self._current_config is None:
+            return
+        updated = replace(
+            self._current_config,
+            alarm=replace(
+                self._current_config.alarm,
+                enabled=self._alarm_enabled_check.isChecked(),
+                condition=self._condition_combo.currentData(),
+                value=float(self._threshold_spin.value()),
+                hysteresis=float(self._hysteresis_spin.value()),
+                delay_ms=int(self._delay_spin.value()),
+            ),
+        )
+        self._push_config(updated)
+        self.alarm_changed.emit(self._current_roi_id)
 
     def _on_recording_changed(self) -> None:
-        if self._current_roi_id:
-            self.recording_changed.emit(self._current_roi_id)
+        if self._current_roi_id is None or self._current_config is None:
+            return
+        updated = replace(
+            self._current_config,
+            recording=replace(
+                self._current_config.recording,
+                enabled=self._rec_enabled_check.isChecked(),
+                duration_seconds=int(self._duration_spin.value()),
+            ),
+        )
+        self._push_config(updated)
+        self.recording_changed.emit(self._current_roi_id)
 
     def _on_description_changed(self) -> None:
-        self._emit_appearance()
+        self._appearance_config(description=self._description_edit.text())
 
     def _emit_appearance(self) -> None:
         if self._current_roi_id:
             self.appearance_changed.emit(self._current_roi_id)
+
+    def _appearance_config(self, **changes) -> None:
+        if self._current_roi_id is None or self._current_config is None:
+            return
+        self._push_config(replace(self._current_config, **changes))
+        self.appearance_changed.emit(self._current_roi_id)
+
+    def _rename_config(self, name: str) -> None:
+        if self._current_roi_id is None or self._current_config is None:
+            return
+        self._push_config(replace(self._current_config, name=name))
+
+    def _push_config(self, config: ROIConfiguration) -> None:
+        """Store the new config and notify the workspace."""
+        self._current_config = config
+        self.config_updated.emit(config)

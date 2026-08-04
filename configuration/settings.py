@@ -23,6 +23,10 @@ class Settings:
     ENABLE_VISIBLE_STREAM: bool = True
     ENABLE_THERMAL_STREAM: bool = True
     ENABLE_TEMPERATURE_DATA: bool = True
+    # Runs the legacy ROI manager in parallel with the ROI engine and
+    # logs a warning on any statistics mismatch. Verification only;
+    # keep False in production.
+    ROI_ENGINE_DUAL_VALIDATION: bool = False
     # ==========================================================
     # Recording
     # ==========================================================

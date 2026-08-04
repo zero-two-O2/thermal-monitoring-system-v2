@@ -11,16 +11,11 @@ from __future__ import annotations
 
 import halcon as ha
 
-from conftest import build_test_store, make_config
-from roi.geometry import (
-    CircleROI,
-    EllipseROI,
-    PolygonROI,
-    Rectangle1ROI,
-    Rectangle2ROI,
-)
+from conftest import make_config
+from roi.geometry import CircleROI, EllipseROI, PolygonROI, Rectangle1ROI, Rectangle2ROI
 from roi_engine.masks import MaskCache
 from roi_engine.region_cache import RegionCache
+from roi_engine.store.factory import build_store
 from roi_engine.types import ALL_SHAPES, ROIShape
 
 
@@ -49,7 +44,7 @@ def _all_type_configs(enabled_ids: set[str] | None = None) -> list:
 def test_regions_before_image_have_area() -> None:
     """Regions must be valid before any image exists (clip guard works)."""
     configs = _all_type_configs({f"g{i}" for i in range(8)})
-    store = build_test_store(configs)
+    store = build_store("cam_1", "pos_1", configs)
     cache = RegionCache()
     cache.rebuild(store)
     for shape in ALL_SHAPES:
@@ -63,7 +58,7 @@ def test_regions_before_image_have_area() -> None:
 def test_batch_counts_match_enabled() -> None:
     """Region tuple sizes equal the enabled counts per type."""
     configs = _all_type_configs({f"g{i}" for i in range(8)})
-    store = build_test_store(configs)
+    store = build_store("cam_1", "pos_1", configs)
     cache = RegionCache()
     cache.rebuild(store)
     for shape in ALL_SHAPES:
@@ -78,7 +73,7 @@ def test_batch_counts_match_enabled() -> None:
 def test_disabled_only_type_is_none() -> None:
     """A type with zero enabled ROIs yields None and zero count."""
     configs = _all_type_configs({"g0"})
-    store = build_test_store(configs)
+    store = build_store("cam_1", "pos_1", configs)
     cache = RegionCache()
     cache.rebuild(store)
     assert cache.regions(ROIShape.CIRCLE) is None
@@ -90,22 +85,23 @@ def test_disabled_only_type_is_none() -> None:
 def test_needs_rebuild_only_on_generation_change() -> None:
     """Same store stays cached; a new generation invalidates."""
     configs = _all_type_configs({f"g{i}" for i in range(8)})
-    store = build_test_store(configs, generation=1)
+    store1 = build_store("cam_1", "pos_1", configs)
     cache = RegionCache()
-    cache.rebuild(store)
-    assert not cache.needs_rebuild(store)
-    same = build_test_store(configs, generation=1)
-    assert not cache.needs_rebuild(same)
-    newer = build_test_store(configs, generation=2)
-    assert cache.needs_rebuild(newer)
-    cache.rebuild(newer)
-    assert not cache.needs_rebuild(newer)
+    cache.rebuild(store1)
+    assert not cache.needs_rebuild(store1)
+    store2 = build_store("cam_1", "pos_1", configs)
+    assert not cache.needs_rebuild(store2)
+    configs_new = configs
+    store3 = build_store("cam_1", "pos_1", configs_new, generation=2)
+    assert cache.needs_rebuild(store3)
+    cache.rebuild(store3)
+    assert not cache.needs_rebuild(store3)
 
 
 def test_clear_resets_to_empty() -> None:
     """Clear() returns to the pre-first-rebuild state."""
     configs = _all_type_configs({f"g{i}" for i in range(8)})
-    store = build_test_store(configs)
+    store = build_store("cam_1", "pos_1", configs)
     cache = RegionCache()
     cache.rebuild(store)
     cache.clear()
@@ -126,7 +122,7 @@ def test_polygon_alignment_matches_direct_generation() -> None:
         make_config("p0", geoms[0], enabled=True),
         make_config("p1", geoms[1], enabled=True),
     ]
-    store = build_test_store(configs)
+    store = build_store("cam_1", "pos_1", configs)
     cache = RegionCache()
     cache.rebuild(store)
     regions = cache.regions(ROIShape.POLYGON)
@@ -161,7 +157,7 @@ def test_mask_pixel_counts_match_halcon_within_two_percent() -> None:
         make_config("r1", Rectangle1ROI(10, 10, 50, 90), enabled=True),
         make_config("r1b", Rectangle1ROI(60, 60, 100, 100), enabled=False),
     ]
-    store = build_test_store(raw_configs)
+    store = build_store("cam_1", "pos_1", raw_configs)
     masks = MaskCache()
     masks.rebuild(store, (480, 640))
     for shape in (
@@ -179,9 +175,6 @@ def test_mask_pixel_counts_match_halcon_within_two_percent() -> None:
             assert mask.sum() > 0
             region = _geometry_to_region(shape, cfg.geometry)
             halcon_count = ha.area_center(region)[0][0]
-            # HALCON's own ellipse rasterization deviates ~2.3% from the
-            # analytic area, so the ellipse tolerance is 3%; everything
-            # else must stay within 2%.
             tolerance = 0.03 if shape is ROIShape.ELLIPSE else 0.02
             assert abs(mask.sum() - halcon_count) / halcon_count <= tolerance, (
                 f"{shape} #{i}: mask {mask.sum()} vs HALCON {halcon_count}"
@@ -196,7 +189,7 @@ def test_mask_disabled_index_returns_none() -> None:
         make_config("c0", CircleROI(100, 120, 30), enabled=True),
         make_config("c1", CircleROI(400, 520, 45), enabled=False),
     ]
-    store = build_test_store(configs)
+    store = build_store("cam_1", "pos_1", configs)
     masks = MaskCache()
     masks.rebuild(store, (480, 640))
     mask, _, _ = masks.mask(ROIShape.CIRCLE, 0)
@@ -218,7 +211,7 @@ def test_memory_bytes_grows_after_rebuild() -> None:
             enabled=True,
         ),
     ]
-    store = build_test_store(configs)
+    store = build_store("cam_1", "pos_1", configs)
     masks = MaskCache()
     regions = RegionCache()
     assert masks.memory_bytes() == 0
