@@ -61,6 +61,8 @@ This skill enforces rules for building production-quality PyQt6 desktop applicat
 3. **ALWAYS** apply QSS stylesheets at the QApplication level rather than per-widget -- per-widget inline styles create inconsistent themes and unmaintainable styling sprawl.
 4. **NEVER** use absolute pixel coordinates for widget layout -- use Qt layout managers (QVBoxLayout, QHBoxLayout, QGridLayout) to ensure DPI-aware and cross-platform rendering.
 5. **ALWAYS** test the UI on all target platforms before release -- PyQt6 rendering, font scaling, and widget sizing differ between Windows, macOS, and Linux.
+6. **NEVER** emit the signal a slot is connected to from inside that slot -- re-emitting the handled signal causes unbounded recursion (RecursionError in pytest; native stack overflow 0xC0000409 outside pytest). If re-broadcast is needed, emit a distinct signal or guard with `self.sender() is not <emitter>`; first verify the re-emit is not redundant (grep consumers -- if they connect to the bus directly, drop the re-emit).
+7. **ALWAYS** treat a printed traceback in `-s` pytest output as a defect -- PyQt swallows exceptions raised inside slots, so a "passing" test that printed a traceback is hiding a real error, not passing code.
 
 ## Anti-Patterns
 
@@ -71,6 +73,7 @@ This skill enforces rules for building production-quality PyQt6 desktop applicat
 | Hardcoding pixel sizes and positions           | Breaks on high-DPI displays and different OS DPI scaling settings                 | Use layout managers and size policies; use `logicalDpiX()` for DPI-aware sizing       |
 | Setting styles inline on individual widgets    | Creates visual inconsistency; extremely difficult to theme or maintain            | Define a single QSS stylesheet at QApplication level and use object names/classes     |
 | Ignoring cross-platform rendering differences  | Widget sizes, fonts, and margins differ significantly between Windows/macOS/Linux | Test on all target platforms; use platform-conditional logic where rendering diverges |
+| Re-emitting the handled signal inside a slot   | Unbounded recursion: RecursionError in pytest, native stack overflow (0xC0000409) outside pytest; PyQt swallows slot exceptions so tests may "pass" while printing tracebacks | Emit a distinct signal or drop the re-emit after verifying consumers connect to the bus directly |
 
 ## Workflow
 

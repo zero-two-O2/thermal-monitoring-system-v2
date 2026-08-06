@@ -26,3 +26,12 @@ If a line starts with a ! (exclamation mark), it means that the line is not cove
 Add tests to cover the missing lines.
 
 Keep running the tests and improving coverage until all lines are covered.
+
+## Stale-Test Classification
+
+When tests fail during verification:
+
+1. **Prove pre-existence** - Check out prior commits in a git worktree (`git worktree add <path> <commit>`); run the failing tests there. If they fail identically, the tests are stale, not broken by recent changes.
+2. **Classify by cause** - Typical stale causes: pixel-convention changes, removed APIs, unreachable thresholds.
+3. **Fix only verified defects** - Change production code only when the failure reproduces from a recent change; otherwise update the tests to match current expectations.
+4. **Document** - Record stale tests in `Known_Issues.md` (or equivalent) instead of silently editing them.

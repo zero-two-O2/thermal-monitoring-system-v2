@@ -88,6 +88,16 @@ Detailed pattern documentation lives in `references/details.md`. Read that file 
 9. **Consider NumPy** for numerical operations
 10. **Profile production code** - Use py-spy for live systems
 
+## Benchmark Methodology
+
+When measuring performance of repeated or long-running code:
+
+1. **Preserve baseline artifacts** - Before re-running any script that overwrites its own report (`--report`), copy the report and raw data files to dated backups (e.g. `ROI_Benchmark_Report_2026-08-05.md`). Re-running destroys the comparison reference.
+2. **Record ambient environment** - Sample system CPU load during the run (e.g. every 5 s) and log it. Use it to explain timing deltas (16-28% improvements can be pure load variance) before suspecting code changes.
+3. **Prefer in-process metrics** - External samplers are unreliable for soak tests: they can sample a launcher shim (constant ~4 MB) instead of the real worker. Use in-process collection (e.g. psutil RSS per interval) inside the harness.
+4. **Verify process identity** - Before trusting external numbers, check working-set magnitude and the process tree. Suspiciously small or constant values mean a sampling error, not a real result.
+5. **Regression-gate every change** - Full test suite + targeted tests + linter after each change; re-run the whole suite at the end.
+
 ## Common Pitfalls
 
 - Optimizing without profiling

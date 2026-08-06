@@ -1,0 +1,45 @@
+{
+  "instincts": [
+    {
+      "trigger": "Connecting a PyQt slot that will emit the same signal it handles",
+      "action": "Check the handler body for emit of the connected signal; if present, remove it or emit a distinct signal; verify with a full-circuit search of consumers",
+      "confidence": 0.95,
+      "category": "coding",
+      "source": "session-extraction"
+    },
+    {
+      "trigger": "A pytest run passes but -s output contains tracebacks",
+      "action": "Treat as a hidden defect; traceback printing from PyQt slots means swallowed exceptions, not passing code",
+      "confidence": 0.85,
+      "category": "testing",
+      "source": "session-extraction"
+    },
+    {
+      "trigger": "Re-running any script that overwrites its own report file",
+      "action": "Copy report and raw data to dated backups first; record ambient CPU load during the run for the delta explanation",
+      "confidence": 0.9,
+      "category": "testing",
+      "source": "session-extraction"
+    },
+    {
+      "trigger": "PowerShell script variable name collision",
+      "action": "Avoid $pid/$PID (read-only); use descriptive names; expect 'Cannot overwrite variable' as the symptom",
+      "confidence": 0.8,
+      "category": "coding",
+      "source": "session-extraction"
+    },
+    {
+      "trigger": "Failing tests discovered during verification",
+      "action": "Prove pre-existence at prior commits via worktree before fixing; classify as stale vs defect; document in Known_Issues.md",
+      "confidence": 0.9,
+      "category": "testing",
+      "source": "session-extraction"
+    }
+  ],
+  "metadata": {
+    "version": "1.0",
+    "exported": "2026-08-06T12:45:00Z",
+    "author": "thermal-monitoring-v2",
+    "total": 5
+  }
+}

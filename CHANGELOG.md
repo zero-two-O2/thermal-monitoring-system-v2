@@ -1,3 +1,70 @@
+## 2026-08-06 14:35
+### What changed
+- Applied MVTec batched-workflow optimization pass to the standalone ROI prototype (`halcon_roi_validation.py`). No production code touched.
+- Overlay pipeline: `_overlay_rows()` cached, rebuilt only when dirty flag / storage `rev` / alarm set changes; `_build_overlay_pieces()` groups visible outlines by color, one `select_obj` per color group (was per-ROI select loop). `_mark_overlay_stale()` hooked into create/apply-edit/visibility/color/delete/duplicate/clear/load.
+- ROI labels: per-frame `cv2.putText` loop (84.6 ms @50, 3.9 s @2000) replaced by worker-thread renderer with `_label_signature()` caching + `cv2.copyTo` alpha compose; labels redraw only on geometry/stats change. Main-thread label cost @2000: ~15 ms burst, ~1 ms idle.
+- Statistics decoupled from display: `STATS_INTERVAL_MS=200` throttles stats/label refresh to ~5 Hz while display runs at full FPS.
+- Internal per-stage profiler on live + benchmark paths (`_last_timing`: calibration, display_prep, himage, stats, alarm, label, overlay, display convert/image/overlay/flush). Benchmark now reports `stats_peak_ms`, `stats_rect1_ms`, `label_main_ms`, `verify_ms`.
+- `GroupedROIStorage.rev` monotonic counter auto-invalidates overlay cache on any storage mutation.
+### Why
+- Apply the MVTec 12 principles (regions created once, batch stats per shape type, never rebuild during streaming, cached overlays, labels only on stats change, display FPS independent of stats FPS, internal profiler, minimal numpy/HALCON/Qt copies) so ROI count scales without frame drops.
+### Notes
+- Verified: ruff clean, py_compile OK, offscreen smokes pass, real-window display (HAL disp 8-15 ms), live camera drive test (3 cams discovered, real stats, throttled cadence, worker labels). Benchmark @2000 ROIs: 32.6 fps offscreen, 30.7 ms total; full 111 ms (9 FPS) budget with real display ~45 ms worst case.
+- Known limitation: label worker joins on window close with 1 s timeout; snapshot builds label rows on the main thread.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+- docs/benchmarks/ROI_MVTec_Optimization_Report.md (new)
+
+## 2026-08-06 13:22
+### What changed
+- Bug-fix / usability pass on the standalone ROI prototype (`halcon_roi_validation.py`). No architecture changes, production ROI engine untouched.
+- Fixed the editing bridge: `_drawing_geometry()` read `get_drawing_object_params` results as a list-of-lists and returned HALCON column names (`column1`/`column`) that `update_geometry` silently filtered out. Drawing-object moves therefore never reached the geometry arrays, so RegionCache, statistics, table and overlay stayed stale at the old position. The bridge now unpacks the flat value list and maps to the storage keys (`col1`/`col`).
+- Overlay no longer displays the filled statistics regions: it shows 1 px `boundary()` outline contours taken from the cached regions (same source of truth). Outline contours are generated inside `RegionCache._rebuild` (cached outlines, no per-frame boundary cost). Hidden ROIs and the ROI being edited (rendered by its drawing object) are skipped. Benchmark FPS at 2000 ROIs: 5.4 -> 15.4.
+- Selected ROI renders yellow (drawing object), others green by default (stored colour), alarms red. Colour editor kept and now applies the colour to the live drawing object immediately (verified HALCON supports per-object drawing-object colours).
+- ROI labels (name + Min/Avg/Max) drawn into the display frame each statistics refresh (cv2), anchored at the ROI's top-left; they follow the geometry and disappear when the ROI is hidden/deleted. Labels are not drawn on the benchmark path.
+- Added Focus - / Focus + / Manual NUC toolbar buttons wired to `TV46LCamera.focus_near()/focus_far()/manual_nuc()`; enabled on connect, disabled on disconnect; Auto Focus button permanently disabled (TV46L has no autofocus command).
+- Event log is now a 160 px multi-line history (was a single line). Mouse/zoom info moved to the main-window status bar with a continuous Frame counter.
+### Why
+- Prototype's grouped-ROI editing workflow did not follow drawing-object edits (stale geometry/stats/overlay) and displayed filled statistics regions instead of outlines; usability items from the bug-fix request.
+### Notes
+- Verified: ruff clean, py_compile OK, offscreen smoke tests pass, real-display end-to-end drag test passes (arrays -> cache -> stats -> overlay -> table), live camera test passes (3 cams discovered, real calibrated statistics, buttons enabled/disabled correctly). Report: docs/ROI_Prototype_Bugfix_Report.md.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+- docs/ROI_Prototype_Bugfix_Report.md (new)
+
+### What changed
+- Processed the session learning extraction: applied the 3 suggested skill updates and staged 5 instincts for continuous-learning-v2.
+- `.agents/skills/pyqt6-ui-development-rules/SKILL.md`: new Iron Laws — a slot must never emit the signal it is connected to (unbounded recursion / 0xC0000409); a printed traceback in passing `-s` pytest output is a hidden defect (PyQt swallows slot exceptions). Added matching anti-pattern row.
+- `.agents/skills/python-performance-optimization/SKILL.md`: new Benchmark Methodology section (dated backups of report/raw data, record ambient CPU, in-process metrics over external samplers, verify process identity, regression-gate every change).
+- `.agents/skills/pytest-coverage/SKILL.md`: new Stale-Test Classification section (prove pre-existence via worktree, classify by cause, fix tests not production code, document in Known_Issues.md).
+- `.opencode/learnings/instincts-2026-08-06.json`: 5 session-extraction instincts in /instinct-import format.
+### Why
+- Persist lessons from the Phase 6 verification session (signal re-emission crash, benchmark baseline preservation, stale-test handling) so future sessions apply them automatically.
+### Notes
+- No production code changed. continuous-learning-v2 CLI not installed on this machine (no instinct-cli.py found); artifact staged for `/instinct-import`.
+### Files Changed
+- .agents/skills/pyqt6-ui-development-rules/SKILL.md
+- .agents/skills/python-performance-optimization/SKILL.md
+- .agents/skills/pytest-coverage/SKILL.md
+- .opencode/learnings/instincts-2026-08-06.json (new)
+- CHANGELOG.md
+
+## 2026-08-06 12:24
+### What changed
+- Refactored `halcon_roi_validation.py` into a standalone ROI Calibration & Performance Prototype demonstrating MVTec's batched ROI architecture (per requirements list from ROI_Architecture.md): grouped type-array ROI storage, cached HALCON regions with dirty-flag rebuild, one batch statistics call per type (no reduce_domain), separated pipeline stages, PyQt5 GUI (toolbar, ROI table, selected-ROI form, processing info panel, thermal view with mouse temperature read-out), and a benchmark (50-2000 ROIs, CSV export, numpy cross-check).
+- No production code touched: `roi_engine/*`, `roi/*`, `gui/calibration`, `gui/observer` are not imported by the prototype; only `camera/*`, `calibration/*`, `configuration/settings.py` are reused.
+- Fixed a benchmark self-check bug: the numpy reference used banker's rounding while HALCON rasterizes rectangles with round-half-away-from-zero, causing ~700-unit stat errors at grid counts where ROI edges sat on x.5 coordinates. Benchmark grid is now quantized to integer pixel bounds; verification is pixel-exact (~0.001 float32 noise) at every count.
+### Why
+- Validate the batched ROI processing concept (grouped storage, dirty region cache, batch intensity/min_max_gray/area_center, 150 ms polled drawing-object editing because HALCON rejects Python callbacks) before porting it into the production ROI engine.
+### Notes
+- Verified headless: 31/31 smoke checks pass (storage, hit tests, cache rebuild counts, stats vs numpy, alarms, all five shapes); GUI instantiates offscreen; benchmark runs at 50/100/250/500/1000/2000 ROIs (~108/94/66/39/24/18 FPS) with exact numpy verification and one region rebuild per type per benchmark run.
+- Known limitations documented in the module docstring: single-threaded pipeline, polled editing, one active drawing object at a time, calibration fallback to raw counts.
+### Files Changed
+- halcon_roi_validation.py (rewrite)
+- CHANGELOG.md
+
 ## 2026-08-06 12:20
 ### What changed
 - Removed the per-frame `logger.debug("Processing frame...")` call and the now-unused `logger` import from `ProcessingPipeline.process()` in `processing/pipeline/processing_pipeline.py`; production hot path no longer emits logging per frame.

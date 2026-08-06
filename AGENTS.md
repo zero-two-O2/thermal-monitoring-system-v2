@@ -93,3 +93,6 @@ Before reading source files:
 4. After modifying code, re-query the graph if additional dependencies may be affected.
 
 Prefer graph queries over full-project searches whenever possible.
+
+## always use the skill caveman
+D:\Projects\Thermal_Monitoring_System_v2\.agents\skills\caveman\SKILL.md
