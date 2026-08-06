@@ -1,0 +1,31 @@
+{
+  "scenario": "error_recovery",
+  "generated": "2026-08-06T10:51:46",
+  "duration_s": 1.331,
+  "counts": {
+    "processed": 15,
+    "dropped": 0,
+    "exceptions": 0,
+    "halcon_errors": 0,
+    "reconnect_events": 0
+  },
+  "fps": {
+    "current": 1.0,
+    "average": 1.0,
+    "minimum": 1.0,
+    "maximum": 1.0
+  },
+  "pipeline_ms": {
+    "average_ms": 2.1392666618339717,
+    "p99_ms": 3.7500000034924597,
+    "maximum_ms": 5.6622000120114535
+  },
+  "memory": {
+    "slope_mb_per_hour": 0.0,
+    "delta_mb": 0.0,
+    "range": {
+      "min": 91.5703125,
+      "max": 91.5703125
+    }
+  }
+}

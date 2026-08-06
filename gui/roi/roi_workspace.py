@@ -260,19 +260,15 @@ class ROIWorkspace(QObject):
         if config is not None:
             self._alarm_manager.register(roi_id, config.alarm)
         self._dirty_tracker.mark_modified(roi_id, ROIDirtyType.ALARM)
-        self._signal_bus.roi_alarm_changed.emit(roi_id)
 
     def _on_appearance_changed(self, roi_id: str) -> None:
         self._dirty_tracker.mark_modified(roi_id, ROIDirtyType.APPEARANCE)
-        self._signal_bus.roi_appearance_changed.emit(roi_id)
 
     def _on_recording_changed(self, roi_id: str) -> None:
         self._dirty_tracker.mark_modified(roi_id, ROIDirtyType.RECORDING)
-        self._signal_bus.roi_recording_changed.emit(roi_id)
 
     def _on_renamed(self, roi_id: str) -> None:
         self._dirty_tracker.mark_modified(roi_id, ROIDirtyType.CONFIGURATION)
-        self._signal_bus.roi_renamed.emit(roi_id)
 
     def process_frame(
         self,

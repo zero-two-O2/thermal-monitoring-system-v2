@@ -1,6 +1,6 @@
 # ROI Engine Pipeline Benchmark
 
-Generated 2026-08-06T10:12:53 by `tests/benchmark_roi_pipeline.py`.
+Generated 2026-08-05T18:28:44 by `tests/benchmark_roi_pipeline.py`.
 
 ## Environment
 
@@ -11,7 +11,7 @@ Generated 2026-08-06T10:12:53 by `tests/benchmark_roi_pipeline.py`.
 | numpy | 2.2.6 |
 | Synthetic image | 480x640 |
 | Seed | 42 |
-| Date | 2026-08-06T10:12:53 |
+| Date | 2026-08-05T18:28:44 |
 
 ## Methodology
 
@@ -46,10 +46,10 @@ memory
 (B) | 111 ms
 budget |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| 100 | 2.95 | 9.57 | 53.18 | 62.75 | 20.66 | 26.33 | 34.59 | 26.10 | 415,503 | 58,328 | OK |
-| 500 | 5.20 | 18.47 | 174.97 | 193.44 | 57.94 | 78.33 | 106.50 | 78.08 | 431,133 | 105,299 | OK |
-| 1000 | 15.68 | 30.58 | 409.08 | 439.66 | 124.47 | 156.36 | 175.88 | 156.20 | 450,714 | 182,070 | EXCEEDS |
-| 1600 | 18.17 | 36.88 | 797.61 | 834.49 | 206.19 | 242.38 | 350.60 | 242.28 | 475,594 | 269,105 | EXCEEDS |
+| 100 | 2.21 | 6.04 | 57.04 | 63.09 | 18.64 | 25.21 | 34.97 | 25.10 | 416,183 | 58,328 | OK |
+| 500 | 9.21 | 35.11 | 313.73 | 348.84 | 78.54 | 92.99 | 107.14 | 92.73 | 430,872 | 105,299 | OK |
+| 1000 | 12.71 | 46.39 | 498.64 | 545.03 | 185.94 | 215.71 | 254.08 | 215.14 | 450,646 | 182,070 | EXCEEDS |
+| 1600 | 24.33 | 51.33 | 829.03 | 880.36 | 236.56 | 297.33 | 379.54 | 297.21 | 476,186 | 269,105 | EXCEEDS |
 
 ## Legacy vs. Batched
 
@@ -57,11 +57,11 @@ budget |
 (ms) | batched median
 (ms) | speedup | legacy frames |
 |---|---|---|---|---|
-| 100 | 93.47 | 26.33 | 3.6x | 10 |
-| 500 | 499.28 | 78.33 | 6.4x | 10 |
-| 1000 | 670.28 | 156.36 | 4.3x | 3 |
-| 1600 | 1368.13 | 242.38 | 5.6x | 3 |
+| 100 | 90.80 | 25.21 | 3.6x | 10 |
+| 500 | 497.45 | 92.99 | 5.3x | 10 |
+| 1000 | 895.00 | 215.71 | 4.1x | 3 |
+| 1600 | 1357.32 | 297.33 | 4.6x | 3 |
 
 ## Interpretation
 
-Per-frame latency grows 9.2x for a 16x ROI increase, i.e. sub-linear (batch amortization grows with ROI count). Per-frame cost is dominated by the batched HALCON operators (intensity, min_max_gray, area_center) and the himage_from_numpy_array conversion; hotspots run in numpy per ROI. Overall, the 111 ms (9 FPS) frame budget is exceeded from 1000 ROIs onward ([1000, 1600]), so the batched engine stays real-time capable within the tested range.
+Per-frame latency grows 11.8x for a 16x ROI increase, i.e. sub-linear (batch amortization grows with ROI count). Per-frame cost is dominated by the batched HALCON operators (intensity, min_max_gray, area_center) and the himage_from_numpy_array conversion; hotspots run in numpy per ROI. Overall, the 111 ms (9 FPS) frame budget is exceeded from 1000 ROIs onward ([1000, 1600]), so the batched engine stays real-time capable within the tested range.

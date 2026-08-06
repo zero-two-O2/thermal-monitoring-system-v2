@@ -1,0 +1,317 @@
+{
+  "schema_version": 1,
+  "camera_id": "cam_harness",
+  "acquisition_state": {
+    "camera_id": "cam_harness",
+    "pan": 1.0,
+    "tilt": 0.0,
+    "zoom": 0.0,
+    "focus": 0.0
+  },
+  "rois": [
+    {
+      "roi_id": "roi_1_0000",
+      "name": "ROI 0",
+      "enabled": true,
+      "visible": true,
+      "description": "",
+      "metadata": {},
+      "geometry": {
+        "type": "rectangle1",
+        "row1": 0,
+        "col1": 0,
+        "row2": 105,
+        "col2": 84
+      },
+      "style": {
+        "color": "#FFFF00",
+        "selected_color": "#00FF00",
+        "alarm_color": "#FF0000",
+        "line_width": 2,
+        "label_visible": true,
+        "label_size": 10
+      },
+      "alarm": {
+        "enabled": false,
+        "condition": "HIGH",
+        "value": 85.0,
+        "hysteresis": 1.0,
+        "delay_ms": 0
+      },
+      "recording": {
+        "enabled": false,
+        "duration_seconds": 20,
+        "pre_trigger_seconds": 0,
+        "post_trigger_seconds": 20,
+        "save_images": false,
+        "save_video": true
+      }
+    },
+    {
+      "roi_id": "roi_1_0001",
+      "name": "ROI 1",
+      "enabled": true,
+      "visible": true,
+      "description": "",
+      "metadata": {},
+      "geometry": {
+        "type": "rectangle1",
+        "row1": 0,
+        "col1": 85,
+        "row2": 105,
+        "col2": 169
+      },
+      "style": {
+        "color": "#FFFF00",
+        "selected_color": "#00FF00",
+        "alarm_color": "#FF0000",
+        "line_width": 2,
+        "label_visible": true,
+        "label_size": 10
+      },
+      "alarm": {
+        "enabled": false,
+        "condition": "HIGH",
+        "value": 85.0,
+        "hysteresis": 1.0,
+        "delay_ms": 0
+      },
+      "recording": {
+        "enabled": false,
+        "duration_seconds": 20,
+        "pre_trigger_seconds": 0,
+        "post_trigger_seconds": 20,
+        "save_images": false,
+        "save_video": true
+      }
+    },
+    {
+      "roi_id": "roi_1_0002",
+      "name": "ROI 2",
+      "enabled": true,
+      "visible": true,
+      "description": "",
+      "metadata": {},
+      "geometry": {
+        "type": "rectangle1",
+        "row1": 0,
+        "col1": 170,
+        "row2": 105,
+        "col2": 254
+      },
+      "style": {
+        "color": "#FFFF00",
+        "selected_color": "#00FF00",
+        "alarm_color": "#FF0000",
+        "line_width": 2,
+        "label_visible": true,
+        "label_size": 10
+      },
+      "alarm": {
+        "enabled": false,
+        "condition": "HIGH",
+        "value": 85.0,
+        "hysteresis": 1.0,
+        "delay_ms": 0
+      },
+      "recording": {
+        "enabled": false,
+        "duration_seconds": 20,
+        "pre_trigger_seconds": 0,
+        "post_trigger_seconds": 20,
+        "save_images": false,
+        "save_video": true
+      }
+    },
+    {
+      "roi_id": "roi_1_0003",
+      "name": "ROI 3",
+      "enabled": true,
+      "visible": true,
+      "description": "",
+      "metadata": {},
+      "geometry": {
+        "type": "rectangle1",
+        "row1": 106,
+        "col1": 0,
+        "row2": 211,
+        "col2": 84
+      },
+      "style": {
+        "color": "#FFFF00",
+        "selected_color": "#00FF00",
+        "alarm_color": "#FF0000",
+        "line_width": 2,
+        "label_visible": true,
+        "label_size": 10
+      },
+      "alarm": {
+        "enabled": false,
+        "condition": "HIGH",
+        "value": 85.0,
+        "hysteresis": 1.0,
+        "delay_ms": 0
+      },
+      "recording": {
+        "enabled": false,
+        "duration_seconds": 20,
+        "pre_trigger_seconds": 0,
+        "post_trigger_seconds": 20,
+        "save_images": false,
+        "save_video": true
+      }
+    },
+    {
+      "roi_id": "roi_1_0004",
+      "name": "ROI 4",
+      "enabled": true,
+      "visible": true,
+      "description": "",
+      "metadata": {},
+      "geometry": {
+        "type": "rectangle1",
+        "row1": 106,
+        "col1": 85,
+        "row2": 211,
+        "col2": 169
+      },
+      "style": {
+        "color": "#FFFF00",
+        "selected_color": "#00FF00",
+        "alarm_color": "#FF0000",
+        "line_width": 2,
+        "label_visible": true,
+        "label_size": 10
+      },
+      "alarm": {
+        "enabled": false,
+        "condition": "HIGH",
+        "value": 85.0,
+        "hysteresis": 1.0,
+        "delay_ms": 0
+      },
+      "recording": {
+        "enabled": false,
+        "duration_seconds": 20,
+        "pre_trigger_seconds": 0,
+        "post_trigger_seconds": 20,
+        "save_images": false,
+        "save_video": true
+      }
+    },
+    {
+      "roi_id": "roi_1_0005",
+      "name": "ROI 5",
+      "enabled": true,
+      "visible": true,
+      "description": "",
+      "metadata": {},
+      "geometry": {
+        "type": "rectangle1",
+        "row1": 106,
+        "col1": 170,
+        "row2": 211,
+        "col2": 254
+      },
+      "style": {
+        "color": "#FFFF00",
+        "selected_color": "#00FF00",
+        "alarm_color": "#FF0000",
+        "line_width": 2,
+        "label_visible": true,
+        "label_size": 10
+      },
+      "alarm": {
+        "enabled": false,
+        "condition": "HIGH",
+        "value": 85.0,
+        "hysteresis": 1.0,
+        "delay_ms": 0
+      },
+      "recording": {
+        "enabled": false,
+        "duration_seconds": 20,
+        "pre_trigger_seconds": 0,
+        "post_trigger_seconds": 20,
+        "save_images": false,
+        "save_video": true
+      }
+    },
+    {
+      "roi_id": "roi_1_0006",
+      "name": "ROI 6",
+      "enabled": true,
+      "visible": true,
+      "description": "",
+      "metadata": {},
+      "geometry": {
+        "type": "rectangle1",
+        "row1": 212,
+        "col1": 0,
+        "row2": 317,
+        "col2": 84
+      },
+      "style": {
+        "color": "#FFFF00",
+        "selected_color": "#00FF00",
+        "alarm_color": "#FF0000",
+        "line_width": 2,
+        "label_visible": true,
+        "label_size": 10
+      },
+      "alarm": {
+        "enabled": false,
+        "condition": "HIGH",
+        "value": 85.0,
+        "hysteresis": 1.0,
+        "delay_ms": 0
+      },
+      "recording": {
+        "enabled": false,
+        "duration_seconds": 20,
+        "pre_trigger_seconds": 0,
+        "post_trigger_seconds": 20,
+        "save_images": false,
+        "save_video": true
+      }
+    },
+    {
+      "roi_id": "roi_1_0007",
+      "name": "ROI 7",
+      "enabled": true,
+      "visible": true,
+      "description": "",
+      "metadata": {},
+      "geometry": {
+        "type": "rectangle1",
+        "row1": 212,
+        "col1": 85,
+        "row2": 317,
+        "col2": 169
+      },
+      "style": {
+        "color": "#FFFF00",
+        "selected_color": "#00FF00",
+        "alarm_color": "#FF0000",
+        "line_width": 2,
+        "label_visible": true,
+        "label_size": 10
+      },
+      "alarm": {
+        "enabled": false,
+        "condition": "HIGH",
+        "value": 85.0,
+        "hysteresis": 1.0,
+        "delay_ms": 0
+      },
+      "recording": {
+        "enabled": false,
+        "duration_seconds": 20,
+        "pre_trigger_seconds": 0,
+        "post_trigger_seconds": 20,
+        "save_images": false,
+        "save_video": true
+      }
+    }
+  ]
+}

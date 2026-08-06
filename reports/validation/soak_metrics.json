@@ -1,0 +1,31 @@
+{
+  "scenario": "soak",
+  "generated": "2026-08-06T10:47:10",
+  "duration_s": 7.714,
+  "counts": {
+    "processed": 11,
+    "dropped": 0,
+    "exceptions": 0,
+    "halcon_errors": 0,
+    "reconnect_events": 0
+  },
+  "fps": {
+    "current": 2.2590842915612566,
+    "average": 1.9494984778172297,
+    "minimum": 1.0,
+    "maximum": 2.288690193613304
+  },
+  "pipeline_ms": {
+    "average_ms": 435.9430545459459,
+    "p99_ms": 433.7066000152845,
+    "maximum_ms": 576.906100002816
+  },
+  "memory": {
+    "slope_mb_per_hour": 0.0,
+    "delta_mb": 0.0,
+    "range": {
+      "min": 85.23046875,
+      "max": 85.5234375
+    }
+  }
+}

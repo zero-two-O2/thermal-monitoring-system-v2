@@ -1,0 +1,165 @@
+{
+  "generated": "2026-08-06T10:47:03",
+  "soak": {
+    "verdict": "PASS",
+    "fps": {
+      "current": 2.2590842915612566,
+      "average": 1.9494984778172297,
+      "minimum": 1.0,
+      "maximum": 2.288690193613304
+    },
+    "slope_mb_per_hour": 0.0,
+    "exceptions": 0,
+    "report_dir": "reports\\validation"
+  },
+  "dual_validation": {
+    "verdict": "PASS",
+    "frames": 1000,
+    "mismatch_warnings": 0,
+    "affected_rois": 0,
+    "report_dir": "reports\\validation"
+  },
+  "position_switch": {
+    "verdict": "PASS",
+    "switches": 500,
+    "errors": [],
+    "stale_cache_detected": false,
+    "report_dir": "reports\\validation"
+  },
+  "camera_switch": {
+    "verdict": "SKIPPED",
+    "reason": "no camera available",
+    "report_dir": "reports\\validation"
+  },
+  "roi_editing": {
+    "verdict": "PASS",
+    "failed": [],
+    "operations": [
+      {
+        "op": "create",
+        "ok": true,
+        "note": "id=roi_53bc61ac"
+      },
+      {
+        "op": "move_off_spot",
+        "ok": true,
+        "note": "max 47.52 -> 22.21"
+      },
+      {
+        "op": "move_onto_spot",
+        "ok": true,
+        "note": "max=91.44"
+      },
+      {
+        "op": "resize",
+        "ok": true,
+        "note": "max=94.75"
+      },
+      {
+        "op": "rename",
+        "ok": true
+      },
+      {
+        "op": "duplicate",
+        "ok": true,
+        "note": "id=roi_ce3be557"
+      },
+      {
+        "op": "hide",
+        "ok": true,
+        "note": "visible=False processed=True"
+      },
+      {
+        "op": "show",
+        "ok": true,
+        "note": "visible=True"
+      },
+      {
+        "op": "disable",
+        "ok": true,
+        "note": "enabled=False processed=False"
+      },
+      {
+        "op": "enable",
+        "ok": true,
+        "note": "enabled=True max=94.79"
+      },
+      {
+        "op": "delete",
+        "ok": true
+      }
+    ],
+    "report_dir": "reports\\validation"
+  },
+  "high_count": {
+    "verdict": "PASS",
+    "steps": [
+      {
+        "frames": 30,
+        "elapsed_s": 0.75,
+        "fps": 39.998,
+        "rois": 100,
+        "engine_memory_mb": 0.09,
+        "gui_ok": true
+      },
+      {
+        "frames": 30,
+        "elapsed_s": 0.856,
+        "fps": 35.034,
+        "rois": 250,
+        "engine_memory_mb": 0.112,
+        "gui_ok": true
+      },
+      {
+        "frames": 30,
+        "elapsed_s": 1.567,
+        "fps": 19.147,
+        "rois": 500,
+        "engine_memory_mb": 0.144,
+        "gui_ok": true
+      },
+      {
+        "frames": 30,
+        "elapsed_s": 2.65,
+        "fps": 11.319,
+        "rois": 1000,
+        "engine_memory_mb": 0.217,
+        "gui_ok": true
+      },
+      {
+        "frames": 30,
+        "elapsed_s": 3.884,
+        "fps": 7.723,
+        "rois": 1600,
+        "engine_memory_mb": 0.299,
+        "gui_ok": true
+      }
+    ],
+    "camera_mode": false,
+    "report_dir": "reports\\validation"
+  },
+  "error_recovery": {
+    "verdict": "PASS",
+    "camera_mode": false,
+    "errors": [],
+    "events": [
+      {
+        "event": "baseline",
+        "ok": true
+      },
+      {
+        "event": "engine_recreated",
+        "ok": true
+      },
+      {
+        "event": "position_reload",
+        "ok": true
+      },
+      {
+        "event": "statistics_recovered",
+        "ok": true
+      }
+    ],
+    "report_dir": "reports\\validation"
+  }
+}

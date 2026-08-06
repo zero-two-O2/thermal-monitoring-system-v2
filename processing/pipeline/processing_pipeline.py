@@ -41,8 +41,6 @@ from processing.models.processing_models import (
 from processing.roi_processor import ROIProcessor
 from processing.alarm_processor import AlarmProcessor
 
-from utilities import logger
-
 
 class ProcessingPipeline:
 
@@ -70,8 +68,6 @@ class ProcessingPipeline:
         """
         Process one thermal frame.
         """
-
-        logger.debug("Processing frame...")
 
         calibration = self._calibration.get_calibration()
 

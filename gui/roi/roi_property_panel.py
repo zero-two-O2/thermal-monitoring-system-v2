@@ -344,6 +344,8 @@ class ROIPropertyPanel(QWidget):
         self._appearance_config(visible=self._visible_check.isChecked())
 
     def _on_color_changed(self) -> None:
+        if self._current_roi_id is None or self._current_config is None:
+            return
         self._appearance_config(
             style=replace(
                 self._current_config.style,
@@ -352,6 +354,8 @@ class ROIPropertyPanel(QWidget):
         )
 
     def _on_line_width_changed(self) -> None:
+        if self._current_roi_id is None or self._current_config is None:
+            return
         self._appearance_config(
             style=replace(
                 self._current_config.style,

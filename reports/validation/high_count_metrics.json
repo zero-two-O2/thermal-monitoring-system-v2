@@ -1,0 +1,31 @@
+{
+  "scenario": "high_count",
+  "generated": "2026-08-06T10:51:45",
+  "duration_s": 11.783,
+  "counts": {
+    "processed": 150,
+    "dropped": 0,
+    "exceptions": 0,
+    "halcon_errors": 0,
+    "reconnect_events": 0
+  },
+  "fps": {
+    "current": 7.412857300026201,
+    "average": 13.208852824404364,
+    "minimum": 1.0,
+    "maximum": 34.85440159550789
+  },
+  "pipeline_ms": {
+    "average_ms": 59.682525999184385,
+    "p99_ms": 155.1954000024125,
+    "maximum_ms": 188.7210999848321
+  },
+  "memory": {
+    "slope_mb_per_hour": 1425.129,
+    "delta_mb": 1.887,
+    "range": {
+      "min": 89.03515625,
+      "max": 90.94921875
+    }
+  }
+}

@@ -1,3 +1,35 @@
+## 2026-08-06 12:20
+### What changed
+- Removed the per-frame `logger.debug("Processing frame...")` call and the now-unused `logger` import from `ProcessingPipeline.process()` in `processing/pipeline/processing_pipeline.py`; production hot path no longer emits logging per frame.
+- Phase 6 verification: re-ran the ROI benchmark (100/500/1000/1600) under reduced background load (closed Teams/Widgets/SearchHost; sampled CPU 20-80%, avg ~50%). New medians 26.3/78.3/156.4/242.4 ms vs baseline 25.2/93.0/215.7/297.3 ms — 500/1000/1600 improved 16-28% (load variance; no code changes to roi_engine). 100 ROI within noise. Budget status unchanged: 100/500 within the 111 ms (9 FPS) frame budget, 1000/1600 exceed it.
+- Ran 900 s ROI soak (500 ROIs, synthetic): 14,205 frames, 0 exceptions, 0 HALCON errors, RSS stable 79-83 MB, memory slope 21.8 MB/h (limit 100). Dual-validation/position-switch/roi-editing/high-count/error-recovery all PASS. Camera_switch SKIPPED - no hardware connected.
+- Static logging/code review: no per-frame, no benchmark-time, no debug logging remains in production code (camera/, processing/, roi_engine/, observation/, gui/). Diagnostic [DIAG] prints remain only in the legacy diagnostic camera driver used by manual test tools; production camera path (`camera/services/tv46l_camera.py`) is print-free. Removed temp artifacts (err/out.txt, bench/soak stdout captures, stray reports_test/reports_x).
+- Added verification deliverables: reports/System_Verification_Report.md, Performance_Summary.md, Regression_Summary.md, Production_Readiness_Assessment.md, Go_NoGo_Recommendation.md; docs/Known_Issues.md; and docs/ROI_Production_Validation.md (manual GUI checklist previously referenced by the harness but missing).
+### Why
+- Phase 6 verification: logging hygiene + performance/memory evidence from the validation harness; confirmed architecture limits before any optimization.
+### Notes
+- Camera hardware unavailable during verification (GigE discovery scan returned no boards). Camera connect/disconnect/reconnect, streaming, calibration all deemed Not Executed.
+### Files Changed
+- processing/pipeline/processing_pipeline.py
+- docs/benchmarks/ROI_Benchmark_Report.md
+- docs/Known_Issues.md (new)
+- docs/ROI_Production_Validation.md (new)
+- reports/System_Verification_Report.md, Performance_Summary.md, Regression_Summary.md, Production_Readiness_Assessment.md, Go_NoGo_Recommendation.md (new)
+- CHANGELOG.md
+
+## 2026-08-06 10:15
+### What changed
+- Fixed an infinite-signal-loop bug in `gui/roi/roi_workspace.py`: the four `_on_*_changed` handlers (`_on_alarm_changed`, `_on_appearance_changed`, `_on_recording_changed`, `_on_renamed`) re-emitted the exact signal they are connected to on the same bus, causing unbounded recursion (RecursionError in pytest, native stack-overflow crash 0xC0000409 when running outside pytest).
+- Handlers now only do their own work (alarm registration / dirty tracking); they no longer re-emit the incoming signal.
+### Why
+- Phase 6 validation harness crashed with 0xC0000409 on `--scenario roi_editing`; root-cause bisection isolated the re-emission. Widgets that need to react (e.g. list row refresh in `CalibrationWindow`, which connects directly to the bus) are already notified by the original emitter, so the re-emit was redundant.
+### Notes
+- Full suite: 518 passed, 8 failed — identical to pre-fix baseline (4 pixel-convention + 2 HRegion API in test_roi_phase2.py, 2 alarm-threshold in test_processing_pipeline.py). All 14 harness tests pass with no RecursionError in `-s` output.
+- Validation scenarios: soak/dual_validation/position_switch/roi_editing/high_count/error_recovery all PASS; camera_switch SKIPPED (no camera hardware).
+### Files Changed
+- gui/roi/roi_workspace.py
+- CHANGELOG.md
+
 ## 2026-08-04 16:10
 ### What changed
 - Fixed a Phase 4 data-flow bug: the ROI property panel never wrote config edits back, so enabled/visible/alarm/recording/name toggles never reached the immutable engine store. Added `ROIWorkspace.update_configuration(config)` (replaces the stored config + `mark_dirty` store reload) and `ROIPropertyPanel.config_updated` (emits replaced configs from all edit handlers); `CalibrationWindow` wires the two.
@@ -129,6 +161,19 @@
 - requirements-dev.txt (new)
 - docs/Development_Setup.md (new)
 - docs/DevelopmentEnvironment.md (new)
+- CHANGELOG.md
+
+## 2026-08-03 10:30
+### What changed
+- Fixed `AttributeError: 'NoneType' object has no attribute 'style'` crash in `ROIPropertyPanel` (`gui/roi/roi_property_panel.py`).
+- `_on_color_changed` and `_on_line_width_changed` built `replace(self._current_config.style, ...)` before the `_appearance_config` None-guard ran, so changing color/line width while no ROI is selected (or during clear/reset) crashed.
+- Added the same `_current_roi_id is None or _current_config is None` early-return guard used by the alarm/recording handlers.
+### Why
+- GUI crash on startup/reset path when the appearance controls changed value with no ROI selected.
+### Notes
+- Verified: ruff clean, module imports. Other appearance handlers were already safe because they pass plain values into `_appearance_config`.
+### Files Changed
+- gui/roi/roi_property_panel.py
 - CHANGELOG.md
 
 ## 2026-08-03 09:00
