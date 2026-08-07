@@ -1,3 +1,15 @@
+## 2026-08-07 16:00
+### What changed
+- Fixed reconnect after Disconnect in `halcon_roi_validation.py`. `_on_connect` only acted `if self._worker and not self._worker._connected`; after Disconnect `_shutdown_thread()` nulls the worker and thread, so Connect became a silent no-op. Now Connect tears down any stale worker then always creates a fresh one via `_discover_and_connect()`, producing a brand-new framegrabber each time (never reusing a handle). Connect -> Disconnect -> Connect works repeatedly.
+- Focus Near/Far now log current, target and final focus distance once per command in `_execute_focus`. Reads the existing `FLK_TI_ControlFeature_CurrentFocusDistanceMm` parameter before and after the move; prints `Focus Near|Far`, `Current`, `Target`, `Final` (mm). On read failure prints `Current focus unavailable`.
+### Why
+- Reconnect button did nothing after disconnect; operators had to restart the app. Focus had no feedback of what position it landed on.
+### Notes
+- Verified `py_compile` clean. Live camera needed to confirm repeated reconnect and to observe actual focus log output on hardware. No GUI layout, ROI processing, or alarm system changed.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
 ## 2026-08-07 15:30
 ### What changed
 - Fixed `AlarmManager` API mismatch in `halcon_roi_validation.py`. `active_alarms` is a `@property`, but the worker called `self._alarm_manager.active_alarms()` (with parens) in `run()` at the set-diff check and the `alarms_changed.emit(...)` call, raising `TypeError: 'list' object is not callable` before the loop. Now calls use the property with no parens; single interface throughout.

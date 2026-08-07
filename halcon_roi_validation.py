@@ -548,11 +548,23 @@ class CameraWorker(QObject):
         )
 
     def _execute_focus(self, direction: int):
-        """Execute focus near/far."""
-        self.focus_status.emit(True, "Focus started")
+        """Execute focus near/far with before/move/after diagnostics.
+
+        Logs current, target and final focus once per command. If the
+        focus value cannot be read before moving, log that and stop.
+        """
+        label = "Focus Near" if direction == 1 else "Focus Far"
+        self.focus_status.emit(True, label)
 
         try:
             current = self._focus_get("FLK_TI_ControlFeature_CurrentFocusDistanceMm")
+        except Exception as e:
+            self.log_message.emit("Current focus unavailable")
+            self.focus_status.emit(False, f"{label} failed")
+            logger.exception(f"{label} failed to read focus: {e}")
+            return
+
+        try:
             step = int(self._config.get("focus", "step_mm")) * direction
             target = current + step
 
@@ -569,11 +581,17 @@ class CameraWorker(QObject):
                     break
                 time.sleep(0.02)
 
+            final = self._focus_get("FLK_TI_ControlFeature_CurrentFocusDistanceMm")
+
+            self.log_message.emit(label)
+            self.log_message.emit(f"Current : {current:.2f} mm")
+            self.log_message.emit(f"Target : {target:.2f} mm")
+            self.log_message.emit(f"Final : {final:.2f} mm")
             self.focus_status.emit(False, "Focus completed")
 
         except Exception as e:
-            self.focus_status.emit(False, f"Focus failed: {e}")
-            logger.exception("Focus execution failed")
+            self.focus_status.emit(False, f"{label} failed")
+            logger.exception(f"{label} execution failed: {e}")
 
     def _attempt_reconnect(self):
         """Attempt to reconnect to camera."""
@@ -1029,8 +1047,19 @@ class MainWindow(QMainWindow):
         self._worker_thread.start()
 
     def _on_connect(self):
-        """Handle connect button - retry discovery and connection."""
-        if self._worker and not self._worker._connected:
+        """Handle connect button - start a fresh connection.
+
+        After Disconnect both the worker and its thread are destroyed, so
+        a later Connect must build everything from scratch. Never reuse a
+        stale framegrabber or worker; always create a new one exactly like
+        a fresh application startup.
+        """
+        if self._worker is not None and not self._worker._connected:
+            # Tear down a half-dead worker before starting a fresh one.
+            self._worker.stop()
+            self._shutdown_thread()
+
+        if self._worker is None:
             self._discover_and_connect()
 
     def _on_disconnect(self):
