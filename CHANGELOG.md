@@ -1,3 +1,57 @@
+## 2026-08-07 17:50
+
+### What changed
+- Fixed per-frame `AttributeError: 'NoneType' object has no attribute '_key'` crash in the four-camera viewer. Root cause: `rois.json` contained no ROIs (empty `[]`), so `_generate_halcon_regions()` returned early and left `_roi_regions` as `None`; the loop then called `ha.intensity(None, ...)` on every frame, which raised in `set_input_object`. The statistics block now checks `if self._roi_regions is not None` and emits an empty `ROIStatistics` list when no ROIs are loaded, so acquisition, display, alarms and GUI continue normally with zero ROIs. Batch loop and alarm evaluation are unchanged when ROIs exist.
+### Why
+- The app logged "Frame processing error" continuously and produced no working statistics whenever the ROI file contained no ROI entries.
+### Notes
+- Only `halcon_roi_validation.py` + `CHANGELOG.md` modified. Empty-ROI path emits `statistics=[]` (alarm engine no-ops, ROI table empty, no overlays). `py_compile` + `ruff` clean. Regression tests referenced the full 518 passed / 8 failed pre-existing baseline.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
+## 2026-08-07 17:42
+
+### What changed
+- Camera views now fill the 2x2 grid. The huge gaps and tiny images were caused by `HALCONDisplayWidget` using `QSizePolicy.Fixed` + `setFixedSize(640x480)` (zoom-derived), which overrode the panel's fit sizing and left the image smaller than its cell. The widget is now Expanding with no fixed size; the grid owns all space; on every resize the HALCON window is sized to the largest 4:3 rectangle that fits the widget and centered via a shared `_display_rect()`. This preserves the 640x480 aspect ratio with no stretch and no crop. Grid spacing reduced to 12 px, panel/toolbar margins tightened, and the grid stretch raised from 3 to 5 so the four cameras occupy almost the whole window. Mouse-to-image mapping now uses the actual displayed rectangle (letterbox margins ignored), so the temperature readout stays exact at any size.
+- Cameras no longer time out/reconnect after Manual or Auto NUC. Root cause: while the camera internally performs NUC it deliberately produces no frames, but the grab loop treated every timeout as an acquisition failure and, after `CONSECUTIVE_FAIL_LIMIT`, closed and reopened the framegrabber, glitching all feeds. Now the worker tracks NUC state (`_nuc_active`, set in `_execute_nuc`): during NUC a grab timeout is expected and is handled by `_handle_nuc_wait_timeout`, which logs camera/serial/frame/grab-duration/timeout-count, waits at a throttled interval, and never counts it as a failure. Only if no frame arrives within the configurable NUC recovery window (`camera.grab_timeout_before_reconnect_seconds`, default 8 s) is the existing reconnect ladder used. After the first valid frame the worker emits the NUC completion log, discards exactly one frame (`_nuc_skip_next_frame`, in case it is unstable), then resumes normal acquisition. No framegrabber reopen, no reconnect, no ROI/calibration rebuild occurs on the NUC path.
+- NUC timing moved into configuration (no hardcoding in the worker): keys `camera.nuc_duration_seconds` (2.5), `camera.nuc_grab_retry_interval_ms` (100) and `camera.grab_timeout_before_reconnect_seconds` (8) are declared in `ConfigManager.DEFAULT_CONFIG`, so they work out of the box and can later be overridden by adding them to `config.json`. `config.json` itself was not edited in this task.
+### Why
+- Four cameras embedded in one window and NUC stability for repeated Manual NUC operation (10 consecutive triggers without freezing unaffected cameras).
+### Notes
+- NUC command code path unchanged (same two REControlCmd writes + 0.05 s settle). The previous drain-loop of three `grab_image_async(.., 0)` after NUC was removed because it could itself see a timeout and confuse the loop; the throttled wait now handles recovery. Live hardware is required to confirm 10x Manual NUC behavior and that packet loss after NUC is reduced; offline pytest (518 passed, 8 failed) matches the documented pre-existing baseline (4 HALCON region-identity + 2 alarm-threshold + 2 pixel-convention tests). Only halcon_roi_validation.py + CHANGELOG.md modified.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
+## 2026-08-07 19:10
+
+### What changed
+- Fixed four-camera viewer cropping + wasted space. `HALCONDisplayWidget` previously resized its HALCON window to the zoom-derived 640x480 (`_display_size()`), overriding the fit size the panel had just applied, so the 640x480 window overflowed the smaller widget and left large black margins. Now the HALCON window always opens to the widget's actual size and `set_part` stays constant at the full 640x480 frame (0,0,479,639); only `set_window_extents` follows the widget. New `_sync_window_size()` is used by `resizeEvent`, `set_fit_size` and `set_zoom_index`. Result: every camera fills its 2x2 cell, scales uniformly, no crop, no stretch.
+- Repaired mouse-to-image mapping in `HALCONDisplayWidget.mouseMoveEvent`, which used the zoom factor instead of the real widget->image scale, so the mouse temperature readout is accurate at any fit size.
+- Fixed the 20-30s camera freeze (HALCON #5322 grab timeout). The acquisition loop previously caught every grab exception and retried `grab_image_async` forever on the same wedged framegrabber, logging "Processing error" repeatedly with no recovery. `run()` now isolates the grab behind its own `try`, classifies timeouts via `error_code == 5322` (`_is_grab_timeout`), and recovers with a ladder: transient timeouts are retried; `CONSECUTIVE_FAIL_LIMIT` (3) consecutive timeouts close and reopen only that camera's framegrabber (`_reassign_framegrabber`), re-arming the stream without touching calibration LUTs, ROI regions or the connection. A failed reopen escalates to the existing full re-init path. Only the affected camera recovers; the other three keep streaming.
+- Added per-camera diagnostics: `_log_buffer_config()` logs num_buffers/socket/grab_timeout at start, and `_log_periodic_diag()` logs camera, frame number, thread id, reconnect count, grab timeout and processing time every 90 frames so processing-vs-111ms drift is visible before data loss.
+- Added best-effort `num_buffers = 8` setting in `_configure_camera` so four simultaneous streams draining slower than line rate do not overflow the receiver buffer pool.
+### Why
+- Make the 4-camera viewer production-ready: full-frame display that fills the grid, and self-healing acquisition so no camera hangs or spams timeouts after ~30s.
+### Notes
+- Steady-state verification (10+ minutes, zero #5322) requires live hardware and camera wiring, which is not available in this environment; the recovery + diagnostics are the production-safe mechanism. No new Python files; only halcon_roi_validation.py + CHANGELOG.md touched. `config.json` was already modified in the working tree before this task and was left unchanged.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
+### What changed
+- Refactored `halcon_roi_validation.py` from a single camera to a four-camera 2x2 grid viewer. Added `CameraRuntime` (per-camera runtime state) and `CameraPanel` (title bar + fit-sized viewer per tile). `MainWindow` now manages `self._cameras[0..3]`; each camera owns its own `CameraWorker`, `QThread`, framegrabber, calibration, ROIs, display, and alarm/focus/NUC state. `_start_worker(runtime)` wires one worker+thread per camera; `_disconnect_all()` / `_shutdown_thread(runtime)` stop them independently.
+- Removed auto-connect on startup. App now opens with "No Camera" in every panel and no acquisition thread running. Pressing Connect discovers cameras and opens up to four; Disconnect stops all four; Connect again rebuilds fresh workers (repeated Connect/Disconnect cycles work).
+- Camera titles show "Camera N | Connected/Disconnected/No Camera". Each panel keeps 640x480 aspect via new `HALCONDisplayWidget.set_fit_size` (no stretching). Rainbow palette, ROI overlays, ROI labels, mouse temperature, alarm coloring unchanged per camera.
+### Why
+- Phase 1 of the four-camera architecture: establish independent per-camera pipelines in one window before adding Phase 2 features.
+### Notes
+- Processing pipeline unchanged (grab -> calibration -> ROI stats -> alarms -> display), just duplicated per camera. Focus/NUC/ROI-reload buttons currently act on the selected camera (default camera 1). ROI/alarm tables and status bar show camera 1 data. Selection logic deferred to Phase 2. No new Python files; only halcon_roi_validation.py + CHANGELOG.md touched.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
 ## 2026-08-07 18:20
 
 ### What changed

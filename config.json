@@ -6,7 +6,7 @@
 
   "alarm": {
     "enabled": true,
-    "temperature_limit": 40.0,
+    "temperature_limit": 50.0,
     "use_max_temperature": true
   },
 
@@ -16,7 +16,7 @@
   },
 
   "focus": {
-    "default_focus_mm": 1000,
+    "default_focus_mm": 900,
     "coarse_step_mm": 1000,
     "fine_step_mm": 100
   },

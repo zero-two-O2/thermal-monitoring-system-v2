@@ -26,6 +26,7 @@ import sys
 import time
 import json
 import logging
+import threading
 from types import SimpleNamespace
 from typing import List, Tuple, Optional, Dict, Callable
 from dataclasses import dataclass
@@ -34,9 +35,9 @@ import halcon as ha
 import numpy as np
 from PyQt6.QtCore import (QThread, pyqtSignal, QObject, QTimer, QMutex, Qt)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                              QHBoxLayout, QLabel, QPushButton, QTableWidget,
-                              QTableWidgetItem, QTextEdit, QStatusBar,
-                              QToolBar, QHeaderView, QScrollArea,
+                              QHBoxLayout, QGridLayout, QLabel, QPushButton,
+                              QTableWidget, QTableWidgetItem, QTextEdit,
+                              QStatusBar, QToolBar, QHeaderView,
                               QSizePolicy)
 from PyQt6.QtGui import QFont, QColor, QCloseEvent
 
@@ -55,6 +56,14 @@ FEED_W = 640
 FEED_H = 480
 ROI_JSON_PATH = "rois.json"
 CONFIG_PATH = "config.json"
+
+# Grab timeout for grab_image_async. At 9 FPS a frame arrives every ~111 ms,
+# so 500 ms tolerates a single skipped frame without wedging the stream.
+GRAB_TIMEOUT_MS = 500
+# HALCON error code for "image acquisition timeout" on grab_image_async.
+GRAB_TIMEOUT_ERROR_CODE = 5322
+# Consecutive grab timeouts before the framegrabber is closed and reopened.
+CONSECUTIVE_FAIL_LIMIT = 3
 
 
 @dataclass
@@ -76,6 +85,33 @@ class ROIStatistics:
     range_val: float
 
 
+class CameraRuntime:
+    """Owns all runtime state for one camera instance.
+
+    Every camera in the 2x2 grid gets its own CameraRuntime. It holds the
+    independent framegrabber/worker/thread plus the per-camera display
+    and live copies of the latest frame and statistics. No state here is
+    shared between cameras.
+    """
+
+    def __init__(self, index: int) -> None:
+        self.index = index
+        self.camera_info = None
+        self.worker = None
+        self.worker_thread = None
+        self.display = None
+        self.title_label = None
+        self.connected = False
+        self.latest_temp = None
+        self.latest_statistics: List[ROIStatistics] = []
+        self.current_focus = 0.0
+        self.fps = 0.0
+        self.processing_time_ms = 0.0
+
+
+CAMERA_COUNT = 4
+
+
 class ConfigManager:
     """Loads config.json once at startup and holds values in memory.
 
@@ -84,7 +120,13 @@ class ConfigManager:
     """
 
     DEFAULT_CONFIG = {
-        "camera": {"fps": 9, "reconnect_seconds": 3},
+        "camera": {
+            "fps": 9,
+            "reconnect_seconds": 3,
+            "nuc_duration_seconds": 2.5,
+            "nuc_grab_retry_interval_ms": 100,
+            "grab_timeout_before_reconnect_seconds": 8,
+        },
         "alarm": {
             "enabled": True,
             "temperature_limit": 80.0,
@@ -236,6 +278,22 @@ class CameraWorker(QObject):
         self._nuc_requested = False
         self._focus_requested = False
         self._focus_step = 0
+        self._frame_number = 0
+        self._consecutive_failures = 0
+        self._reconnect_count = 0
+        self._last_proc_ms = 0.0
+        # NUC recovery state. NUC is requested via _nuc_requested and runs
+        # in the acquisition loop. While _nuc_active is True the camera may
+        # produce no frames at all (that is normal camera behaviour during
+        # NUC), so grab timeouts are not treated as acquisition failures.
+        self._nuc_active = False
+        self._nuc_wait_started = 0.0
+        self._nuc_grab_duration_ms = 0.0
+        self._nuc_timeout_count = 0
+        self._nuc_skip_next_frame = False
+        self._nuc_duration_seconds = float(self._config.get("camera", "nuc_duration_seconds"))
+        self._nuc_retry_interval_ms = float(self._config.get("camera", "nuc_grab_retry_interval_ms"))
+        self._nuc_recover_timeout_s = float(self._config.get("camera", "grab_timeout_before_reconnect_seconds"))
         self._reconnect_seconds = float(self._config.get("camera", "reconnect_seconds"))
         self._auto_nuc_enabled = bool(self._config.get("nuc", "auto_enabled"))
         self._nuc_interval = float(self._config.get("nuc", "interval_seconds"))
@@ -316,6 +374,13 @@ class CameraWorker(QObject):
             ha.set_framegrabber_param(self._framegrabber, "[Stream]GevStreamReceiveSocketSize", 1048576)
         except Exception as e:
             logger.warning(f"Unable to set socket buffer size: {e}")
+
+        # Give the receiver enough in-flight buffers so 4 simultaneous
+        # streams draining slower than line rate do not overflow the pool.
+        try:
+            ha.set_framegrabber_param(self._framegrabber, "num_buffers", 8)
+        except Exception as e:
+            logger.warning(f"Unable to set num_buffers: {e}")
 
         try:
             ha.set_framegrabber_param(
@@ -399,6 +464,170 @@ class CameraWorker(QObject):
         else:
             self.log_message.emit(f"ALARM CLEARED: {roi_name}")
 
+    @staticmethod
+    def _thread_id() -> int:
+        """Return the calling thread's identifier for diagnostics."""
+        return threading.get_ident()
+
+    @staticmethod
+    def _is_grab_timeout(exc: Exception) -> bool:
+        """Return True when an exception is an image-acquisition timeout.
+
+        HALCON raises HOperatorError whose error_code is 5322 for a grab
+        timeout, so numeric detection is authoritative. A string fallback
+        covers HALCON builds that only expose the message text.
+        """
+        code = getattr(exc, "error_code", None)
+        if code is not None:
+            return int(code) == GRAB_TIMEOUT_ERROR_CODE
+        message = str(exc) or ""
+        lowered = message.lower()
+        return "5322" in message and "timeout" in lowered or (
+            "grab" in lowered and "timeout" in lowered
+        )
+
+    def _log_buffer_config(self) -> None:
+        """Log the stream/buffer parameters the camera reports (diagnostics)."""
+        for name in ("num_buffers", "[Stream]GevStreamReceiveSocketSize", "grabbing_timeout"):
+            try:
+                value = ha.get_framegrabber_param(self._framegrabber, name)
+            except Exception:
+                continue
+            logger.info(
+                "Camera %s framegrabber handle=%r %s = %r",
+                self._camera_info.serial, self._framegrabber, name, value,
+            )
+
+    def _log_periodic_diag(self) -> None:
+        """Throttled per-camera timing report to expose any bottleneck.
+
+        Runs on a cadence inside the acquisition thread. It shows grab +
+        processing + total loop time vs the ~111 ms frame interval so a
+        slowly growing drift (the pre-freeze signature) is visible in the
+        log before data is actually lost.
+        """
+        logger.info(
+            "Camera %s frame=%d thread=%d reconnects=%d grab_timeout=%dms "
+            "proc=%.1fms framegrabber=%r",
+            self._camera_info.serial, self._frame_number, self._thread_id(),
+            self._reconnect_count, GRAB_TIMEOUT_MS, self._last_proc_ms,
+            self._framegrabber,
+        )
+
+    def _reassign_framegrabber(self) -> bool:
+        """Close and reopen only the framegrabber after a persistent timeout.
+
+        Recovery deliberately touches nothing else: calibration LUTs, ROI
+        regions and the connection state are all reused. Only this camera's
+        framegrabber handle is replaced, so the other three cameras keep
+        streaming untouched.
+        """
+        try:
+            if self._framegrabber:
+                try:
+                    ha.close_framegrabber(self._framegrabber)
+                except Exception:
+                    logger.exception("Error closing stale framegrabber")
+                self._framegrabber = None
+                self._focus_driver = None
+
+            self._framegrabber = ha.open_framegrabber(
+                "GigEVision2", 0, 0, 0, 0, 0, 0,
+                "progressive", -1, "default", -1, "false",
+                "default", self._camera_info.device, 0, -1
+            )
+
+            self._focus_driver = HalconDriver(
+                SimpleNamespace(
+                    camera_id=self._camera_info.serial,
+                    device_identifier=self._camera_info.device,
+                ),
+                framegrabber=self._framegrabber,
+            )
+
+            self._configure_camera()
+            ha.grab_image_start(self._framegrabber, -1)
+            first_frame = ha.grab_image_async(self._framegrabber, 5000)
+            if first_frame is None:
+                return False
+
+            self._connected = True
+            logger.info(
+                "Camera %s framegrabber reopened, acquisition resumed",
+                self._camera_info.serial,
+            )
+            return True
+        except Exception:
+            logger.exception("Framegrabber reassignment failed")
+            self._connected = False
+            return False
+
+    def _handle_nuc_wait_timeout(self) -> None:
+        """Handle a grab timeout while a NUC is in progress.
+
+        During NUC the camera deliberately stops producing frames. A timeout
+        here is expected, so it is never counted as an acquisition failure
+        and never triggers a framegrabber close/reopen. The loop keeps
+        waiting at a throttled interval so the camera is not flooded with
+        grab attempts. Only if the camera still produces no frame after the
+        configured NUC recovery timeout (grab_timeout_before_reconnect_seconds)
+        is the normal timeout recovery ladder used.
+        """
+        self._nuc_timeout_count += 1
+        elapsed_s = time.time() - self._nuc_wait_started
+        logger.info(
+            "Camera %s NUC in progress: timeout %d (frame=%d, grab=%.0fms, "
+            "waited %.1fs of %.1fs)",
+            self._camera_info.serial, self._nuc_timeout_count,
+            self._frame_number, self._nuc_grab_duration_ms, elapsed_s,
+            self._nuc_recover_timeout_s,
+        )
+
+        if elapsed_s >= self._nuc_recover_timeout_s:
+            logger.warning(
+                "Camera %s did not resume after NUC within %.1fs; "
+                "escalating to normal timeout recovery",
+                self._camera_info.serial, self._nuc_recover_timeout_s,
+            )
+            self._nuc_active = False
+            self._nuc_timeout_count = 0
+            self._handle_grab_timeout()
+            return
+
+        # Throttled retry: do not flood the camera with grab attempts while
+        # it is still busy with NUC. The acquisition loop naturally returns
+        # to the configured frame rate once valid frames are available.
+        time.sleep(self._nuc_retry_interval_ms / 1000.0)
+
+    def _handle_grab_timeout(self) -> None:
+        """Recovery ladder for a single grab timeout.
+
+        A transient timeout is logged and retried. After a run of
+        CONSECUTIVE_FAIL_LIMIT timeouts the framegrabber is closed and
+        reopened so the acquisition stream is re-armed; calibration, LUTs
+        and ROI regions are intentionally left untouched.
+        """
+        self._consecutive_failures += 1
+        failed = self._consecutive_failures
+        logger.warning(
+            "Camera %s grab timeout (%d consecutive, frame=%d, thread=%d)",
+            self._camera_info.serial, failed, self._frame_number, self._thread_id(),
+        )
+
+        if failed >= CONSECUTIVE_FAIL_LIMIT:
+            self._consecutive_failures = 0
+            restored = self._reassign_framegrabber()
+            if restored:
+                self._reconnect_count += 1
+                self.log_message.emit(
+                    f"Camera {self._camera_info.serial} acquisition recovered "
+                    f"(reconnect #{self._reconnect_count})"
+                )
+            else:
+                self.log_message.emit(
+                    f"Camera {self._camera_info.serial} recovery failed"
+                )
+
     def run(self):
         """Main processing loop - runs in worker thread.
 
@@ -411,44 +640,95 @@ class CameraWorker(QObject):
             return
         self._running = True
 
+        self._log_buffer_config()
+
         while self._running:
 
-            try:
-                if not self._connected:
-                    if not self._running:
-                        break
-                    self._attempt_reconnect()
-                    time.sleep(self._reconnect_seconds)
-                    continue
+            if not self._connected:
+                if not self._running:
+                    break
+                self._attempt_reconnect()
+                time.sleep(self._reconnect_seconds)
+                continue
 
-                raw_frame = ha.grab_image_async(self._framegrabber, 500)
-                if raw_frame is None:
-                    continue
+            # Grab is isolated so a timeout can trigger targeted recovery
+            # without being confused with a processing failure.
+            grab_started = time.perf_counter()
+            try:
+                raw_frame = ha.grab_image_async(self._framegrabber, GRAB_TIMEOUT_MS)
+            except Exception as grab_exc:
+                self._nuc_grab_duration_ms = (time.perf_counter() - grab_started) * 1000.0
+                if self._nuc_active:
+                    # The camera is internally performing NUC and is not
+                    # producing frames. A timeout here is expected camera
+                    # behaviour, not a failure. Keep waiting; never count
+                    # it, never reconnect, never reopen the framegrabber.
+                    self._handle_nuc_wait_timeout()
+                elif self._is_grab_timeout(grab_exc):
+                    self._handle_grab_timeout()
+                else:
+                    self._consecutive_failures = 0
+                    self.log_message.emit(f"Grab failed: {grab_exc}")
+                    logger.exception("Frame grab failed")
+                    time.sleep(0.05)
+                continue
+
+            if raw_frame is None:
+                continue
+
+            # A successful grab clears the timeout streak.
+            self._consecutive_failures = 0
+
+            # NUC recovery: the first valid frame after NUC may still be
+            # unstable. Discard exactly one frame, then resume normal
+            # acquisition at the configured frame rate. No reconnect.
+            if self._nuc_active:
+                self._nuc_active = False
+                wait_timeouts = self._nuc_timeout_count
+                self._nuc_timeout_count = 0
+                self._nuc_skip_next_frame = True
+                self.log_message.emit(
+                    f"NUC finished, first valid frame after {wait_timeouts} "
+                    f"timeouts (frame #{self._frame_number})"
+                )
+
+            if self._nuc_skip_next_frame:
+                self._nuc_skip_next_frame = False
+                continue
+
+            self._nuc_grab_duration_ms = (time.perf_counter() - grab_started) * 1000.0
+
+            try:
+                self._frame_number += 1
+                proc_start = time.perf_counter()
 
                 raw_numpy = ha.himage_as_numpy_array(raw_frame)
 
                 temp_frame = self._calibration.raw_to_temperature(raw_numpy)
 
-                proc_start = time.perf_counter()
-
                 # Convert to HALCON image for ROI statistics
                 halcon_temp_image = ha.himage_from_numpy_array(temp_frame.astype(np.float32))
 
-                mean_vals, dev_vals = ha.intensity(self._roi_regions, halcon_temp_image)
-                min_vals, max_vals, range_vals = ha.min_max_gray(self._roi_regions, halcon_temp_image, 0)
+                statistics: List[ROIStatistics] = []
+                # ROIs may be absent (empty rois.json): without regions the
+                # batch statistics calls would crash, so skip them and emit
+                # an empty statistics list instead.
+                if self._roi_regions is not None:
+                    mean_vals, dev_vals = ha.intensity(self._roi_regions, halcon_temp_image)
+                    min_vals, max_vals, range_vals = ha.min_max_gray(self._roi_regions, halcon_temp_image, 0)
+
+                    for i, name in enumerate(self._roi_names):
+                        statistics.append(ROIStatistics(
+                            name=name,
+                            mean=float(mean_vals[i]),
+                            deviation=float(dev_vals[i]),
+                            minimum=float(min_vals[i]),
+                            maximum=float(max_vals[i]),
+                            range_val=float(range_vals[i])
+                        ))
 
                 proc_time_ms = (time.perf_counter() - proc_start) * 1000.0
-
-                statistics = []
-                for i, name in enumerate(self._roi_names):
-                    statistics.append(ROIStatistics(
-                        name=name,
-                        mean=float(mean_vals[i]),
-                        deviation=float(dev_vals[i]),
-                        minimum=float(min_vals[i]),
-                        maximum=float(max_vals[i]),
-                        range_val=float(range_vals[i])
-                    ))
+                self._last_proc_ms = proc_time_ms
 
                 # Evaluate alarm state from existing statistics only.
                 # No recomputation, no additional HALCON calls.
@@ -467,7 +747,7 @@ class CameraWorker(QObject):
                     remaining = max(0, int(self._nuc_interval - (emit_now - self._last_nuc_time)))
                     self.nuc_countdown.emit(remaining if self._auto_nuc_enabled else -1)
 
-                # Pass numpy array instead of HALCON image (thread-safe)
+                # Pass numpy array instead of halcon image (thread-safe)
                 self.frame_ready.emit(temp_frame, statistics, proc_time_ms)
 
                 self._mutex.lock()
@@ -484,6 +764,10 @@ class CameraWorker(QObject):
                     self._execute_focus(self._focus_step)
                     self._focus_requested = False
                 self._mutex.unlock()
+
+                # Periodic drift/timing report (every ~90 frames).
+                if self._frame_number % 90 == 0:
+                    self._log_periodic_diag()
 
             except Exception as e:
                 # Transient frame-processing error: log it and skip the
@@ -518,8 +802,24 @@ class CameraWorker(QObject):
         return self._auto_nuc_enabled and (now - self._last_nuc_time) >= self._nuc_interval
 
     def _execute_nuc(self):
-        """Execute manual NUC synchronously."""
+        """Execute manual NUC synchronously.
+
+        During NUC the camera internally stops producing frames. This is
+        expected camera behaviour: _nuc_active is set so the acquisition
+        loop treats subsequent grab timeouts as NUC-in-progress and keeps
+        waiting instead of treating them as failures. The camera resumes
+        normal acquisition automatically once the first valid frame
+        arrives; no reconnect and no framegrabber reopen are performed.
+        """
+        logger.info(
+            "Camera %s NUC start (frame=%d, thread=%d, expected_duration=%.1fs)",
+            self._camera_info.serial, self._frame_number, self._thread_id(),
+            self._nuc_duration_seconds,
+        )
         self.nuc_status.emit(True, "NUC started")
+        self._nuc_active = True
+        self._nuc_wait_started = time.time()
+        self._nuc_timeout_count = 0
 
         try:
             ha.set_framegrabber_param(
@@ -534,15 +834,14 @@ class CameraWorker(QObject):
             )
             time.sleep(0.05)
 
-            for _ in range(3):
-                try:
-                    ha.grab_image_async(self._framegrabber, 0)
-                except Exception:
-                    pass
-
+            logger.info(
+                "Camera %s NUC finish (commands issued, waiting for first "
+                "valid frame)", self._camera_info.serial,
+            )
             self.nuc_status.emit(False, "NUC completed")
 
         except Exception as e:
+            self._nuc_active = False
             self.nuc_status.emit(False, f"NUC failed: {e}")
             logger.exception("NUC execution failed")
 
@@ -650,7 +949,7 @@ class CameraWorker(QObject):
 
             self.log_message.emit(f"Current Focus : {final:.2f} mm")
             self.log_message.emit("Default focus completed")
-        except Exception as e:
+        except Exception:
             self.log_message.emit("Default focus failed")
             self.log_message.emit("Continuing with current focus position.")
             logger.exception("Default focus failed")
@@ -720,8 +1019,11 @@ class HALCONDisplayWidget(QWidget):
         self._last_statistics = []
         self._zoom_old_size = None
         self.setMouseTracking(True)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._apply_zoom_size()
+        # Expanding lets the 2x2 grid own the space. The HALCON window is
+        # resized to the largest 4:3 rect inside the widget on every resize,
+        # so each camera fills its cell while keeping the 640x480 aspect.
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._sync_window_size()
 
     @property
     def zoom_factor(self) -> float:
@@ -740,23 +1042,126 @@ class HALCONDisplayWidget(QWidget):
                 return i
         return 2  # 100%
 
-    def _display_size(self) -> Tuple[int, int]:
-        w = max(1, int(round(self._image_width * self.zoom_factor)))
-        h = max(1, int(round(self._image_height * self.zoom_factor)))
-        return w, h
+    def _compute_fit_rect(self) -> Tuple[int, int]:
+        """Largest 4:3 rectangle that fits the current widget size.
 
-    def _apply_zoom_size(self):
-        w, h = self._display_size()
-        self.setFixedSize(w, h)
+        The widget is Expanding so it fills its grid cell; this returns the
+        biggest 640x480-aspect window that fits inside it. Window and image
+        share the same aspect, so the frame scales uniformly (no stretch,
+        no crop, no zoom of the underlying data).
+        """
+        aspect = FEED_W / FEED_H
+        avail_w = max(1, self.width())
+        avail_h = max(1, self.height())
+        w = avail_w
+        h = int(w / aspect)
+        if h > avail_h:
+            h = avail_h
+            w = int(h * aspect)
+        return max(1, w), max(1, h)
+
+    def _display_rect(self) -> Tuple[int, int, int, int]:
+        """On-screen image rectangle (x, y, w, h) inside the widget.
+
+        Uses the largest 4:3 fit scaled by the current zoom factor. Zoom at
+        100% fills the cell; higher zoom is clamped to the fit so the image
+        is never stretched or cropped. The rectangle is centered in the
+        widget, matching what the HALCON window extents show.
+        """
+        fit_w, fit_h = self._compute_fit_rect()
+        scale = min(self.zoom_factor, 1.0)
+        w = max(1, int(round(fit_w * scale)))
+        h = max(1, int(round(fit_h * scale)))
+        x = (self.width() - w) // 2
+        y = (self.height() - h) // 2
+        return x, y, w, h
+
+    def _apply_window_extents(self, x: int, y: int, w: int, h: int):
+        """Size the HALCON window to w x h placed at (x, y) in the widget."""
+        if self._window_handle is None:
+            return
+        try:
+            ha.set_window_extents(self._window_handle, y, x, w, h)
+            ha.set_part(self._window_handle, 0, 0,
+                        self._image_height - 1, self._image_width - 1)
+        except Exception:
+            pass
+
+    def _sync_window_size(self):
+        """Fit the HALCON window inside the widget, preserving 4:3.
+
+        The image display region stays the full 640x480 frame (set_part);
+        only the output window extents change. The window is sized to the
+        largest 4:3 rectangle (scaled by zoom) that fits the widget and
+        centered, so every camera fills its panel on any window resize
+        without stretching or cropping.
+        """
+        if self._window_handle is None:
+            return
+        x, y, w, h = self._display_rect()
+        self._apply_window_extents(x, y, w, h)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_window_size()
+        # Repaint the stored frame at the new extents so the image tracks
+        # the widget immediately instead of waiting for the next grab.
+        if self._last_frame is not None:
+            self._draw()
+
+    def set_fit_size(self, max_w: int, max_h: int):
+        """Resize this viewer to the largest 4:3 rectangle that fits the box.
+
+        Compatibility entry point for the tile layout. Because the widget
+        now fills its cell on its own (Expanding policy), this just forces a
+        re-fit from the widget's live geometry.
+        """
+        self._close_window_for_resize()
+        self._sync_window_size()
+        if self._last_frame is not None:
+            self._draw()
+        self.zoom_changed.emit()
+
+    def _close_window_for_resize(self):
+        """Drop a stale HALCON window so the next _draw recreates it sized to the widget.
+
+        When the widget grows, opening a fresh window at the new size avoids
+        any leftover extents from the previous smaller fit.
+        """
+        if self._window_handle is not None:
+            try:
+                ha.close_window(self._window_handle)
+            except Exception:
+                pass
+            self._window_handle = None
+
+    def set_zoom_index(self, index: int):
+        """Change zoom level; the underlying frame stays 640x480."""
+        if not 0 <= index < len(self.ZOOM_LEVELS):
+            return
+        if index == self._zoom_index:
+            return
+        self._zoom_old_size = self.size()
+        self._zoom_index = index
+        self._sync_window_size()
+        if self._last_frame is not None:
+            self._draw()
+        self.zoom_changed.emit()
 
     def create_window(self):
-        """Create HALCON window embedded in this widget."""
+        """Create a HALCON window that exactly fits the current display rect.
+
+        The window is opened at the current fit size and always maps the
+        full 640x480 image (set_part is constant). set_window_extents
+        follows the widget geometry, so the frame is scaled uniformly and
+        never cropped.
+        """
         if self._window_handle is not None:
             return
         try:
-            w, h = self._display_size()
+            x, y, w, h = self._display_rect()
             self._window_handle = ha.open_window(
-                0, 0, w, h,
+                y, x, w, h,
                 int(self.winId()), "visible", ""
             )
             ha.set_part(self._window_handle, 0, 0,
@@ -771,38 +1176,6 @@ class HALCONDisplayWidget(QWidget):
             ha.set_line_width(self._window_handle, 2)
         except Exception:
             logger.exception("Failed to create HALCON window")
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self._window_handle:
-            try:
-                w, h = self._display_size()
-                ha.set_window_extents(self._window_handle, 0, 0, w, h)
-                ha.set_part(self._window_handle, 0, 0,
-                            self._image_height - 1, self._image_width - 1)
-            except Exception:
-                pass
-
-    def set_zoom_index(self, index: int):
-        """Change zoom level; the underlying frame stays 640x480."""
-        if not 0 <= index < len(self.ZOOM_LEVELS):
-            return
-        if index == self._zoom_index:
-            return
-        self._zoom_old_size = self.size()
-        self._zoom_index = index
-        self._apply_zoom_size()
-        if self._window_handle:
-            try:
-                w, h = self._display_size()
-                ha.set_window_extents(self._window_handle, 0, 0, w, h)
-                ha.set_part(self._window_handle, 0, 0,
-                            self._image_height - 1, self._image_width - 1)
-            except Exception:
-                pass
-        if self._last_frame is not None:
-            self._draw()
-        self.zoom_changed.emit()
 
     def zoom_in(self):
         self.set_zoom_index(min(self._zoom_index + 1, len(self.ZOOM_LEVELS) - 1))
@@ -823,8 +1196,21 @@ class HALCONDisplayWidget(QWidget):
             event.ignore()
 
     def mouseMoveEvent(self, event):
-        x = int(event.position().x() / self.zoom_factor)
-        y = int(event.position().y() / self.zoom_factor)
+        # Map widget pixel to image pixel by the actual on-screen image
+        # rect (x, y, w, h), independent of the zoom label, so the mouse
+        # temperature stays accurate at any fit/zoom size. Coordinates
+        # falling in the centered letterbox margin are ignored.
+        x0, y0, w, h = self._display_rect()
+        px = event.position().x()
+        py = event.position().y()
+        if px < x0 or py < y0:
+            return
+        fit_w = w
+        fit_h = h
+        if px >= x0 + fit_w or py >= y0 + fit_h:
+            return
+        x = int((px - x0) * self._image_width / max(1, fit_w))
+        y = int((py - y0) * self._image_height / max(1, fit_h))
         x = max(0, min(self._image_width - 1, x))
         y = max(0, min(self._image_height - 1, y))
         self.mouse_moved.emit(x, y)
@@ -913,19 +1299,61 @@ class HALCONDisplayWidget(QWidget):
         super().closeEvent(event)
 
 
+class CameraPanel(QWidget):
+    """One 2x2 grid cell: a title bar plus a fit-sized HALCON viewer.
+
+    Each panel belongs to exactly one camera. The display is sized to the
+    largest 4:3 rectangle that fits the panel while keeping the 640x480
+    aspect ratio. Panels are independent; resizing one never affects the
+    others.
+    """
+
+    def __init__(self, index: int, config: ConfigManager):
+        super().__init__()
+        self.index = index
+        self.config = config
+        self._connected = False
+        # Expanding lets the grid split all available space between the four
+        # cells; the display inside fills the rest. No fixed size anywhere
+        # in the panel chain, so resizing the window scales every camera.
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
+
+        self.title_label = QLabel("No Camera")
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title_label.setFont(QFont("Segoe UI", 10))
+        self.title_label.setFixedHeight(22)
+        layout.addWidget(self.title_label)
+
+        self.display = HALCONDisplayWidget(config)
+        layout.addWidget(self.display, stretch=1)
+
+    def _title_text(self) -> str:
+        if self._connected:
+            return f"Camera {self.index + 1} | Connected"
+        return f"Camera {self.index + 1} | Disconnected"
+
+    def set_connected(self, connected: bool) -> None:
+        self._connected = connected
+        self.title_label.setText(self._title_text())
+
+
 class MainWindow(QMainWindow):
-    """Main application window."""
+    """Main application window managing four independent cameras."""
 
     def __init__(self, config: Optional[ConfigManager] = None):
         super().__init__()
         self._config = config if config is not None else ConfigManager()
         self.setWindowTitle("HALCON ROI Validation Tool - TV46L")
-        self.resize(1000, 900)
+        self.resize(1280, 800)
 
-        self._worker = None
-        self._worker_thread = None
-        self._current_temp_frame = None
-        self._camera_info = None
+        self._cameras: List[CameraRuntime] = [
+            CameraRuntime(i) for i in range(CAMERA_COUNT)
+        ]
+        self._selected_index = 0
 
         self._active_alarm_count = 0
         self._nuc_remaining = -1
@@ -934,18 +1362,17 @@ class MainWindow(QMainWindow):
         self._alarm_max_shown = {}
 
         self._setup_ui()
-        self._discover_and_connect()
 
     def _setup_ui(self):
         """Create the GUI layout."""
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(6, 4, 6, 4)
+        main_layout.setSpacing(6)
 
         self._create_toolbar(main_layout)
-        self._create_image_area(main_layout)
+        self._create_camera_grid(main_layout)
         self._create_mouse_temp(main_layout)
         self._create_lower_section(main_layout)
         self._create_event_log(main_layout)
@@ -1019,19 +1446,32 @@ class MainWindow(QMainWindow):
 
         parent_layout.addWidget(toolbar)
 
-    def _create_image_area(self, parent_layout):
-        """Create live thermal image display area inside a scrollable viewer."""
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(False)
-        self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.scroll_area.setStyleSheet(
-            "QScrollArea { background: #1E1E1E; border: 1px solid #3C3C3C; }"
-            "QScrollArea > QWidget > QWidget { background: #1E1E1E; }"
-        )
-        self.display_widget = HALCONDisplayWidget(self._config)
-        self.display_widget.zoom_changed.connect(self._on_zoom_changed)
-        self.scroll_area.setWidget(self.display_widget)
-        parent_layout.addWidget(self.scroll_area, stretch=3)
+    def _create_camera_grid(self, parent_layout):
+        """Create the 2x2 grid of independent camera viewers.
+
+        The grid owns almost all of the available space (stretch 5 in the
+        main layout). Panel-to-panel spacing is a small fixed gap; each
+        panel is Expanding so every resize grows all four cameras. The
+        images inside keep 640x480 aspect and are never stretched/cropped.
+        """
+        grid = QGridLayout()
+        grid.setSpacing(12)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
+
+        for i, runtime in enumerate(self._cameras):
+            panel = CameraPanel(i, self._config)
+            runtime.title_label = panel.title_label
+            runtime.display = panel.display
+            panel.display.mouse_moved.connect(
+                lambda x, y, idx=i: self._on_mouse_move(idx, x, y)
+            )
+            grid.addWidget(panel, i // 2, i % 2)
+
+        parent_layout.addLayout(grid, stretch=5)
 
     def _create_mouse_temp(self, parent_layout):
         """Create mouse temperature readout."""
@@ -1080,13 +1520,14 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self._last_proc_time = 0.0
         self.status_bar.showMessage(
-            f"Disconnected | FPS: 0.0 | Processing: 0.0 ms | Frame: 0 ms | "
-            f"{FEED_W} x {FEED_H} | Zoom: {self.display_widget.zoom_text} | "
+            f"Disconnected | Camera 1 selected | FPS: 0.0 | Processing: 0.0 ms | "
+            f"Frame: 0 ms | {FEED_W} x {FEED_H} | "
+            f"Zoom: {self._cameras[self._selected_index].display.zoom_text} | "
             f"Active Alarms: 0 | Alarm Limit: {self._alarm_limit:.1f} °C"
         )
 
     def _discover_and_connect(self):
-        """Discover cameras and connect to first TV46L."""
+        """Discover cameras and assign up to four to the camera grid."""
         discovery = CameraDiscovery()
         cameras = discovery.discover()
 
@@ -1094,75 +1535,100 @@ class MainWindow(QMainWindow):
             self._log("No cameras found. Click Connect to retry.")
             return
 
-        self._camera_info = cameras[0]
-        self._log(f"Camera discovered: {self._camera_info.serial} ({self._camera_info.ip})")
+        for i, runtime in enumerate(self._cameras):
+            if i < len(cameras):
+                runtime.camera_info = cameras[i]
+                self._log(
+                    f"Camera {i + 1} discovered: "
+                    f"{runtime.camera_info.serial} ({runtime.camera_info.ip})"
+                )
+                self._start_worker(runtime)
+            else:
+                    runtime.title_label.setText(f"Camera {i + 1} | No Camera")
 
-        # Connect automatically
-        self._start_worker()
-
-    def _start_worker(self):
-        """Create and start worker thread."""
-        if not self._camera_info:
-            self._log("No camera info available")
+    def _start_worker(self, runtime: CameraRuntime):
+        """Create and start the worker thread for one camera."""
+        if runtime.camera_info is None:
+            self._log(f"Camera {runtime.index + 1} has no camera info")
             return
 
-        self._worker = CameraWorker(self._camera_info, self._config)
-        self._worker_thread = QThread()
-        self._worker.moveToThread(self._worker_thread)
+        runtime.worker = CameraWorker(runtime.camera_info, self._config)
+        runtime.worker_thread = QThread()
+        runtime.worker.moveToThread(runtime.worker_thread)
 
-        self._worker.frame_ready.connect(self._on_frame_ready)
-        self._worker.error_occurred.connect(self._on_error)
-        self._worker.log_message.connect(self._on_log)
-        self._worker.connected_signal.connect(self._on_connected)
-        self._worker.nuc_status.connect(self._on_nuc_status)
-        self._worker.focus_status.connect(self._on_focus_status)
-        self._worker.alarms_changed.connect(self._on_alarms_changed)
-        self._worker.nuc_countdown.connect(self._on_nuc_countdown)
+        runtime.worker.frame_ready.connect(
+            lambda temp, stats, ms, i=runtime.index:
+                self._on_frame_ready(i, temp, stats, ms)
+        )
+        runtime.worker.error_occurred.connect(
+            lambda msg, i=runtime.index: self._on_error(i, msg)
+        )
+        runtime.worker.log_message.connect(self._on_log)
+        runtime.worker.connected_signal.connect(
+            lambda conn, i=runtime.index: self._on_connected(i, conn)
+        )
+        runtime.worker.nuc_status.connect(
+            lambda busy, msg, i=runtime.index: self._on_nuc_status(i, busy, msg)
+        )
+        runtime.worker.focus_status.connect(
+            lambda busy, msg, i=runtime.index: self._on_focus_status(i, busy, msg)
+        )
+        runtime.worker.alarms_changed.connect(
+            lambda alarms, i=runtime.index: self._on_alarms_changed(i, alarms)
+        )
+        runtime.worker.nuc_countdown.connect(
+            lambda seconds, i=runtime.index: self._on_nuc_countdown(i, seconds)
+        )
 
         # Worker owns the acquisition loop. When run() returns it emits
         # finished; the thread then quits and cleans up its own objects.
-        self._worker.initialized.connect(self._worker.run)
-        self._worker.finished.connect(self._worker_thread.quit)
-        self._worker_thread.finished.connect(self._worker.deleteLater)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
+        runtime.worker.initialized.connect(runtime.worker.run)
+        runtime.worker.finished.connect(runtime.worker_thread.quit)
+        runtime.worker_thread.finished.connect(runtime.worker.deleteLater)
+        runtime.worker_thread.finished.connect(runtime.worker_thread.deleteLater)
 
-        self._worker_thread.started.connect(self._worker.initialize)
-        self._worker_thread.start()
+        runtime.worker_thread.started.connect(runtime.worker.initialize)
+        runtime.worker_thread.start()
 
     def _on_connect(self):
-        """Handle connect button - start a fresh connection.
+        """Handle connect button - build fresh workers for all cameras.
 
-        After Disconnect both the worker and its thread are destroyed, so
-        a later Connect must build everything from scratch. Never reuse a
-        stale framegrabber or worker; always create a new one exactly like
-        a fresh application startup.
+        After Disconnect every worker and thread is destroyed, so a later
+        Connect rebuilds all cameras from scratch, exactly like a fresh
+        application startup.
         """
-        if self._worker is not None and not self._worker._connected:
-            # Tear down a half-dead worker before starting a fresh one.
-            self._worker.stop()
-            self._shutdown_thread()
+        self._discover_and_connect()
 
-        if self._worker is None:
-            self._discover_and_connect()
+    def _disconnect_all(self):
+        """Stop every camera independently and release its resources."""
+        for i, runtime in enumerate(self._cameras):
+            self._shutdown_thread(runtime)
+            runtime.title_label.setText(f"Camera {i + 1} | Disconnected")
+        self.btn_connect.setEnabled(True)
+        self.btn_disconnect.setEnabled(False)
+        self.btn_reload_roi.setEnabled(False)
+        self._set_focus_buttons_enabled(False)
+        self.btn_nuc.setEnabled(False)
+        self.btn_benchmark.setEnabled(False)
+        self._clear_alarm_table()
+        self._log("All cameras disconnected")
 
     def _on_disconnect(self):
-        """Handle disconnect button."""
-        if self._worker:
-            self._worker.stop()
-            self._shutdown_thread()
-            self._log("Camera disconnected")
+        """Handle disconnect button - stop all four cameras."""
+        self._disconnect_all()
 
     def _on_reload_roi(self):
-        """Handle reload ROI button."""
-        if self._worker:
-            self._worker.reload_rois()
-            self.display_widget.set_roi_data(self._worker._roi_names, self._worker._roi_coords)
-            self._resize_roi_table()
+        """Handle reload ROI button - reload ROIs for every connected camera."""
+        for runtime in self._cameras:
+            if runtime.worker is not None:
+                runtime.worker.reload_rois()
+        self._resize_roi_table()
 
     def _on_focus(self, step_mm: int):
-        """Handle focus step buttons."""
-        if self._worker:
-            self._worker.request_focus(step_mm)
+        """Handle focus step buttons for the selected camera."""
+        runtime = self._cameras[self._selected_index]
+        if runtime.worker is not None:
+            runtime.worker.request_focus(step_mm)
             self._set_focus_buttons_enabled(False)
 
     def _set_focus_buttons_enabled(self, enabled: bool):
@@ -1173,9 +1639,10 @@ class MainWindow(QMainWindow):
         self.btn_focus_plus2.setEnabled(enabled)
 
     def _on_nuc(self):
-        """Handle NUC button."""
-        if self._worker:
-            self._worker.request_nuc()
+        """Handle NUC button for the selected camera."""
+        runtime = self._cameras[self._selected_index]
+        if runtime.worker is not None:
+            runtime.worker.request_nuc()
             self.btn_nuc.setEnabled(False)
 
     def _on_benchmark(self):
@@ -1185,37 +1652,26 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, lambda: self._log("Benchmark: run manually via processing loop timing in status bar"))
         self.btn_benchmark.setEnabled(True)
 
-    def _on_frame_ready(self, temp_numpy, statistics: List[ROIStatistics], proc_time_ms: float):
-        """Handle new frame from worker."""
-        self._current_temp_frame = temp_numpy
-        self._last_proc_time = proc_time_ms
+    def _on_frame_ready(self, index: int, temp_numpy, statistics: List[ROIStatistics], proc_time_ms: float):
+        """Handle a new frame for camera `index`."""
+        runtime = self._cameras[index]
+        runtime.latest_temp = temp_numpy
+        runtime.latest_statistics = statistics
+        runtime.processing_time_ms = proc_time_ms
+        runtime.display.display_frame(temp_numpy, statistics, proc_time_ms)
 
-        self.display_widget.display_frame(temp_numpy, statistics, proc_time_ms)
-        self._update_roi_table(statistics)
-        self._update_alarm_max_cells(statistics)
-        self._update_status_bar(proc_time_ms)
+        if index == self._selected_index:
+            self._last_proc_time = proc_time_ms
+            self._update_roi_table(statistics)
+            self._update_alarm_max_cells(statistics)
+            self._update_status_bar(proc_time_ms)
 
     def _on_zoom_changed(self):
-        """Handle zoom change from the display widget."""
+        """Handle zoom change - update status bar for the selected camera."""
         self._update_status_bar(self._last_proc_time)
-        QTimer.singleShot(0, self._recenter_scroll)
 
-    def _recenter_scroll(self):
-        """Keep the zoom center point fixed when the widget resizes."""
-        old = self.display_widget._zoom_old_size
-        if not old or old.width() <= 0 or old.height() <= 0:
-            return
-        hbar = self.scroll_area.horizontalScrollBar()
-        vbar = self.scroll_area.verticalScrollBar()
-        center_x = hbar.value() + hbar.pageStep() / 2.0
-        center_y = vbar.value() + vbar.pageStep() / 2.0
-        scale_x = self.display_widget.width() / old.width()
-        scale_y = self.display_widget.height() / old.height()
-        hbar.setValue(int(center_x * scale_x - hbar.pageStep() / 2.0))
-        vbar.setValue(int(center_y * scale_y - vbar.pageStep() / 2.0))
-
-    def _on_error(self, msg: str):
-        self._log(f"ERROR: {msg}")
+    def _on_error(self, idx: int, msg: str):
+        self._log(f"Camera {idx + 1} ERROR: {msg}")
 
     def _on_log(self, msg: str):
         # Filter out per-frame messages - only log major events
@@ -1233,35 +1689,43 @@ class MainWindow(QMainWindow):
             return
         self._log(msg)
 
-    def _on_connected(self, connected: bool):
-        self.btn_connect.setEnabled(not connected)
-        self.btn_disconnect.setEnabled(connected)
-        self.btn_reload_roi.setEnabled(connected)
-        self.btn_focus_minus2.setEnabled(connected)
-        self.btn_focus_minus.setEnabled(connected)
-        self.btn_focus_plus.setEnabled(connected)
-        self.btn_focus_plus2.setEnabled(connected)
-        self.btn_nuc.setEnabled(connected)
-        self.btn_benchmark.setEnabled(connected)
-        if connected and self._worker:
-            self._clear_alarm_table()
-            self.display_widget.set_roi_data(self._worker._roi_names, self._worker._roi_coords)
-            self._resize_roi_table()
+    def _on_connected(self, index: int, connected: bool):
+        runtime = self._cameras[index]
+        runtime.connected = connected
+        runtime.title_label.setText(
+            f"Camera {index + 1} | {'Connected' if connected else 'Disconnected'}"
+        )
+        any_connected = any(r.connected for r in self._cameras)
+        self.btn_connect.setEnabled(not any_connected)
+        self.btn_disconnect.setEnabled(any_connected)
+        self.btn_reload_roi.setEnabled(any_connected)
+        self.btn_focus_minus2.setEnabled(any_connected)
+        self.btn_focus_minus.setEnabled(any_connected)
+        self.btn_focus_plus.setEnabled(any_connected)
+        self.btn_focus_plus2.setEnabled(any_connected)
+        self.btn_nuc.setEnabled(any_connected)
+        self.btn_benchmark.setEnabled(any_connected)
+        if connected and runtime.worker is not None:
+            runtime.display.set_roi_data(runtime.worker._roi_names, runtime.worker._roi_coords)
+            if index == self._selected_index:
+                self._clear_alarm_table()
+                self._resize_roi_table()
 
     def _resize_roi_table(self):
         """Resize ROI table to match number of loaded ROIs."""
-        if self._worker:
-            num_rois = len(self._worker._roi_names)
+        runtime = self._cameras[self._selected_index]
+        if runtime.worker is not None:
+            num_rois = len(runtime.worker._roi_names)
             self.roi_table.setRowCount(num_rois)
 
-    def _on_nuc_status(self, busy: bool, msg: str):
+    def _on_nuc_status(self, index: int, busy: bool, msg: str):
         self.btn_nuc.setEnabled(not busy)
         self.btn_nuc.setText("NUC in progress..." if busy else "Manual NUC")
-        self._log(msg)
+        self._log(f"Camera {index + 1}: {msg}")
 
-    def _on_focus_status(self, busy: bool, msg: str):
+    def _on_focus_status(self, index: int, busy: bool, msg: str):
         self._set_focus_buttons_enabled(not busy)
-        self._log(msg)
+        self._log(f"Camera {index + 1}: {msg}")
 
     def _update_roi_table(self, statistics: List[ROIStatistics]):
         """Update ROI statistics table - all rows."""
@@ -1283,22 +1747,26 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(
             f"Connected | FPS: {fps}.0 | Processing: {proc_time_ms:.2f} ms | "
             f"Frame: {frame_time_ms:.1f} ms | {FEED_W} x {FEED_H} | "
-            f"Zoom: {self.display_widget.zoom_text} | "
+            f"Zoom: {self._cameras[self._selected_index].display.zoom_text} | "
             f"Active Alarms: {self._active_alarm_count} | {nuc_text} | "
             f"Alarm Limit: {self._alarm_limit:.1f} °C"
         )
 
-    def _on_alarms_changed(self, alarms: List[Alarm]):
-        """Reconcile alarm table and ROI colors when alarm state changes."""
+    def _on_alarms_changed(self, index: int, alarms: List[Alarm]):
+        """Reconcile selected camera's alarm table and ROI colors."""
+        if index != self._selected_index:
+            return
         active = {a.roi_name for a in alarms}
         self._active_alarm_count = len(alarms)
-        self.display_widget.set_active_alarms(active)
+        runtime = self._cameras[self._selected_index]
+        runtime.display.set_active_alarms(active)
         self._sync_alarm_table(alarms)
         self._update_status_bar(self._last_proc_time)
 
-    def _on_nuc_countdown(self, seconds: int):
-        """Receive the auto-NUC countdown (once per second from the worker)."""
-        self._nuc_remaining = seconds
+    def _on_nuc_countdown(self, index: int, seconds: int):
+        """Receive the selected camera's auto-NUC countdown."""
+        if index == self._selected_index:
+            self._nuc_remaining = seconds
 
     def _sync_alarm_table(self, alarms: List[Alarm]):
         """Insert/remove rows so the alarm table mirrors the active set."""
@@ -1348,7 +1816,7 @@ class MainWindow(QMainWindow):
         self._alarm_rows = {}
         self._alarm_max_shown = {}
         self._active_alarm_count = 0
-        self.display_widget.set_active_alarms([])
+        self._cameras[self._selected_index].display.set_active_alarms([])
 
     def _log(self, msg: str):
         """Add message to event log."""
@@ -1358,37 +1826,42 @@ class MainWindow(QMainWindow):
         cursor.movePosition(cursor.MoveOperation.End)
         self.event_log.setTextCursor(cursor)
 
-    def _on_mouse_move(self, x: int, y: int):
-        """Handle mouse movement over display - show temperature at cursor."""
-        if self._current_temp_frame is not None:
-            if 0 <= y < self._current_temp_frame.shape[0] and 0 <= x < self._current_temp_frame.shape[1]:
-                temp = self._current_temp_frame[y, x]
-                self.lbl_mouse_temp.setText(f"Mouse X: {x}  Y: {y}  Temperature: {temp:.2f}°C")
+    def _on_mouse_move(self, index: int, x: int, y: int):
+        """Handle mouse movement over a camera display."""
+        runtime = self._cameras[index]
+        if runtime.latest_temp is not None:
+            if 0 <= y < runtime.latest_temp.shape[0] and 0 <= x < runtime.latest_temp.shape[1]:
+                temp = runtime.latest_temp[y, x]
+                self.lbl_mouse_temp.setText(
+                    f"Camera {index + 1} | Mouse X: {x}  Y: {y}  Temperature: {temp:.2f}°C"
+                )
 
-    def _shutdown_thread(self):
-        """Stop the worker and join its thread before the window closes.
+    def _shutdown_thread(self, runtime: CameraRuntime):
+        """Stop one camera's worker and join its thread.
 
         Order: worker.stop() (flip flag -> run() exits), thread.quit(),
         thread.wait(). Only null the references after the thread has
         actually finished, so we never destroy a still-running QThread.
         """
-        if not self._worker_thread:
+        if not runtime.worker_thread:
             return
-        if self._worker:
-            self._worker.stop()
-        self._worker_thread.quit()
-        joined = self._worker_thread.wait(5000)
+        if runtime.worker:
+            runtime.worker.stop()
+        runtime.worker_thread.quit()
+        joined = runtime.worker_thread.wait(5000)
         if not joined:
             logger.warning(
-                "Worker thread did not exit within 5s; keeping it alive to "
-                "avoid destroying a running QThread"
+                f"Camera {runtime.index + 1} worker thread did not exit within 5s; "
+                "keeping it alive to avoid destroying a running QThread"
             )
             return
-        self._worker = None
-        self._worker_thread = None
+        runtime.worker = None
+        runtime.worker_thread = None
+        runtime.connected = False
 
     def closeEvent(self, event: QCloseEvent):
-        self._shutdown_thread()
+        for runtime in self._cameras:
+            self._shutdown_thread(runtime)
         event.accept()
 
 
@@ -1414,7 +1887,6 @@ def main():
     app.setPalette(dark_palette)
 
     window = MainWindow(config)
-    window.display_widget.mouse_moved.connect(window._on_mouse_move)
     window.show()
 
     sys.exit(app.exec())
