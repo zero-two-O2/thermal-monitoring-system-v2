@@ -1,0 +1,26 @@
+{
+  "camera": {
+    "fps": 9,
+    "reconnect_seconds": 3
+  },
+
+  "alarm": {
+    "enabled": true,
+    "temperature_limit": 40.0,
+    "use_max_temperature": true
+  },
+
+  "nuc": {
+    "auto_enabled": true,
+    "interval_seconds": 120
+  },
+
+  "focus": {
+    "step_mm": 1000
+  },
+
+  "display": {
+    "palette": "temperature",
+    "default_zoom": 100
+  }
+}

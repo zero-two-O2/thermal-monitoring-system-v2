@@ -26,7 +26,7 @@ import sys
 import time
 import json
 import logging
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Callable
 from dataclasses import dataclass
 
 import halcon as ha
@@ -35,7 +35,7 @@ from PyQt6.QtCore import (QThread, pyqtSignal, QObject, QTimer, QMutex, Qt)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QLabel, QPushButton, QTableWidget,
                               QTableWidgetItem, QTextEdit, QStatusBar,
-                              QToolBar, QHeaderView, QMessageBox, QScrollArea,
+                              QToolBar, QHeaderView, QScrollArea,
                               QSizePolicy)
 from PyQt6.QtGui import QFont, QColor, QCloseEvent
 
@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 FEED_W = 640
 FEED_H = 480
 ROI_JSON_PATH = "rois.json"
+CONFIG_PATH = "config.json"
 
 
 @dataclass
@@ -73,6 +74,136 @@ class ROIStatistics:
     range_val: float
 
 
+class ConfigManager:
+    """Loads config.json once at startup and holds values in memory.
+
+    The JSON file is read a single time at construction. The processing
+    loop reads from memory only and never touches the filesystem.
+    """
+
+    DEFAULT_CONFIG = {
+        "camera": {"fps": 9, "reconnect_seconds": 3},
+        "alarm": {
+            "enabled": True,
+            "temperature_limit": 80.0,
+            "use_max_temperature": True,
+        },
+        "nuc": {"auto_enabled": True, "interval_seconds": 300},
+        "focus": {"step_mm": 250},
+        "display": {"palette": "temperature", "default_zoom": 100},
+    }
+
+    def __init__(self, path: str = CONFIG_PATH) -> None:
+        self._path = path
+        self._data = self._load()
+
+    def _load(self) -> Dict[str, dict]:
+        try:
+            with open(self._path, "r") as f:
+                raw = json.load(f)
+            if not isinstance(raw, dict):
+                raise ValueError(f"{self._path} root must be a JSON object")
+            return self._merge(raw)
+        except FileNotFoundError:
+            logger.warning(f"Config file not found: {self._path}; using built-in defaults")
+            return dict(self.DEFAULT_CONFIG)
+        except Exception:
+            logger.exception(f"Failed to load config {self._path}; using built-in defaults")
+            return dict(self.DEFAULT_CONFIG)
+
+    def _merge(self, raw: dict) -> Dict[str, dict]:
+        merged = {}
+        for section, defaults in self.DEFAULT_CONFIG.items():
+            user_section = raw.get(section, {})
+            if not isinstance(user_section, dict):
+                user_section = {}
+            merged[section] = {**defaults, **user_section}
+        return merged
+
+    def get(self, section: str, key: str):
+        """Return a config value from memory. Never touches the JSON file."""
+        return self._data.get(section, {}).get(key)
+
+
+STATE_NORMAL = "NORMAL"
+STATE_ACTIVE = "ACTIVE"
+
+
+@dataclass
+class Alarm:
+    roi_name: str
+    timestamp: float
+    current_max: float
+
+
+class AlarmManager:
+    """Two-state alarm engine (NORMAL <-> ACTIVE) for a set of ROIs.
+
+    Responsibilities:
+        maintain per-ROI alarm state
+        detect new alarms (NORMAL -> ACTIVE)
+        detect cleared alarms (ACTIVE -> NORMAL)
+        return the active alarms
+
+    Exactly one alarm is created when an ROI max temperature exceeds the
+    limit. While the alarm stays active the timestamp is never touched;
+    only current_max is refreshed. When the temperature drops back to or
+    below the limit the alarm is removed, and a later re-crossing creates
+    a brand new alarm with a new timestamp.
+    """
+
+    def __init__(
+        self,
+        limit: float,
+        enabled: bool = True,
+        use_max_temperature: bool = True,
+        on_event: Optional[Callable[[str, bool, float], None]] = None,
+    ) -> None:
+        self._limit = limit
+        self._enabled = enabled
+        self._use_max_temperature = use_max_temperature
+        self._on_event = on_event
+        self._alarms: Dict[str, Alarm] = {}
+
+    @property
+    def active_alarms(self) -> List[Alarm]:
+        return list(self._alarms.values())
+
+    def is_active(self, roi_name: str) -> bool:
+        return roi_name in self._alarms
+
+    def set_limit(self, limit: float) -> None:
+        self._limit = limit
+
+    def evaluate(self, statistics: List[ROIStatistics]) -> None:
+        """Update alarm state from existing ROI statistics only."""
+        if not self._enabled:
+            for name in list(self._alarms):
+                self._release(name)
+            return
+
+        for stat in statistics:
+            if stat.maximum > self._limit:
+                alarm = self._alarms.get(stat.name)
+                if alarm is None:
+                    self._alarms[stat.name] = Alarm(
+                        roi_name=stat.name,
+                        timestamp=time.time(),
+                        current_max=stat.maximum,
+                    )
+                    if self._on_event is not None:
+                        self._on_event(stat.name, True, stat.maximum)
+                else:
+                    alarm.current_max = stat.maximum
+            elif stat.name in self._alarms:
+                self._release(stat.name)
+
+    def _release(self, roi_name: str) -> None:
+        del self._alarms[roi_name]
+        if self._on_event is not None:
+            self._on_event(roi_name, False, 0.0)
+
+
 class CameraWorker(QObject):
     """Worker thread for camera acquisition and HALCON processing."""
 
@@ -82,12 +213,15 @@ class CameraWorker(QObject):
     connected_signal = pyqtSignal(bool)
     nuc_status = pyqtSignal(bool, str)
     focus_status = pyqtSignal(bool, str)
+    alarms_changed = pyqtSignal(object)
+    nuc_countdown = pyqtSignal(int)
     initialized = pyqtSignal()
     finished = pyqtSignal()
 
-    def __init__(self, camera_info: CameraInfo):
+    def __init__(self, camera_info: CameraInfo, config: Optional[ConfigManager] = None):
         super().__init__()
         self._camera_info = camera_info
+        self._config = config if config is not None else ConfigManager()
         self._running = False
         self._mutex = QMutex()
         self._framegrabber = None
@@ -99,6 +233,18 @@ class CameraWorker(QObject):
         self._nuc_requested = False
         self._focus_requested = False
         self._focus_direction = 0
+        self._reconnect_seconds = float(self._config.get("camera", "reconnect_seconds"))
+        self._auto_nuc_enabled = bool(self._config.get("nuc", "auto_enabled"))
+        self._nuc_interval = float(self._config.get("nuc", "interval_seconds"))
+        self._last_nuc_time = time.time()
+        self._last_nuc_emit_cd = 0.0
+        self._last_emitted_alarms = set()
+        self._alarm_manager = AlarmManager(
+            limit=float(self._config.get("alarm", "temperature_limit")),
+            enabled=bool(self._config.get("alarm", "enabled")),
+            use_max_temperature=bool(self._config.get("alarm", "use_max_temperature")),
+            on_event=self._on_alarm_event,
+        )
 
     def initialize(self) -> bool:
         """Stage 1: Open framegrabber, connect camera, grab first image, load calibration, load ROIs, generate regions."""
@@ -125,6 +271,8 @@ class CameraWorker(QObject):
                 raise RuntimeError("Failed to load ROIs")
 
             self._generate_halcon_regions()
+
+            self._last_nuc_time = time.time()
 
             self._connected = True
             self.connected_signal.emit(True)
@@ -154,7 +302,11 @@ class CameraWorker(QObject):
             logger.warning(f"Unable to set socket buffer size: {e}")
 
         try:
-            ha.set_framegrabber_param(self._framegrabber, "FLK_TI_ControlFeature_SetFrameRate", 9)
+            ha.set_framegrabber_param(
+                self._framegrabber,
+                "FLK_TI_ControlFeature_SetFrameRate",
+                int(self._config.get("camera", "fps"))
+            )
         except Exception:
             logger.warning("Unable to set frame rate")
 
@@ -224,6 +376,13 @@ class CameraWorker(QObject):
         self._focus_direction = direction
         self._mutex.unlock()
 
+    def _on_alarm_event(self, roi_name: str, active: bool, current_max: float):
+        """Log alarm transitions from the worker thread."""
+        if active:
+            self.log_message.emit(f"ALARM ACTIVE: {roi_name} at {current_max:.2f}°C")
+        else:
+            self.log_message.emit(f"ALARM CLEARED: {roi_name}")
+
     def run(self):
         """Main processing loop - runs in worker thread.
 
@@ -243,7 +402,7 @@ class CameraWorker(QObject):
                     if not self._running:
                         break
                     self._attempt_reconnect()
-                    time.sleep(0.5)
+                    time.sleep(self._reconnect_seconds)
                     continue
 
                 raw_frame = ha.grab_image_async(self._framegrabber, 500)
@@ -275,23 +434,48 @@ class CameraWorker(QObject):
                         range_val=float(range_vals[i])
                     ))
 
+                # Evaluate alarm state from existing statistics only.
+                # No recomputation, no additional HALCON calls.
+                self._alarm_manager.evaluate(statistics)
+
+                # Notify the GUI only when the active-alarm set changes.
+                current_alarm_names = {a.roi_name for a in self._alarm_manager.active_alarms}
+                if current_alarm_names != self._last_emitted_alarms:
+                    self._last_emitted_alarms = current_alarm_names
+                    self.alarms_changed.emit(self._alarm_manager.active_alarms)
+
+                # Auto-NUC countdown, throttled to once per second.
+                emit_now = time.time()
+                if emit_now - self._last_nuc_emit_cd >= 1.0:
+                    self._last_nuc_emit_cd = emit_now
+                    remaining = max(0, int(self._nuc_interval - (emit_now - self._last_nuc_time)))
+                    self.nuc_countdown.emit(remaining if self._auto_nuc_enabled else -1)
+
                 # Pass numpy array instead of HALCON image (thread-safe)
                 self.frame_ready.emit(temp_frame, statistics, proc_time_ms)
 
                 self._mutex.lock()
+                now = time.time()
+                auto_nuc_due = self._auto_nuc_due(now)
                 if self._nuc_requested:
                     self._execute_nuc()
                     self._nuc_requested = False
+                    self._last_nuc_time = time.time()
+                elif auto_nuc_due:
+                    self._execute_nuc()
+                    self._last_nuc_time = now
                 if self._focus_requested:
                     self._execute_focus(self._focus_direction)
                     self._focus_requested = False
                 self._mutex.unlock()
 
             except Exception as e:
-                if self._connected:
-                    self.log_message.emit(f"Processing error: {e}")
-                    logger.exception("Frame processing error")
-                    self._handle_disconnect()
+                # Transient frame-processing error: log it and skip the
+                # frame. Do NOT disconnect / reinitialize the camera here;
+                # calibration, LUT, ROI regions and the connection must be
+                # created only once. The acquisition thread stays alive.
+                self.log_message.emit(f"Processing error: {e}")
+                logger.exception("Frame processing error")
 
         self._cleanup()
         self.finished.emit()
@@ -312,6 +496,10 @@ class CameraWorker(QObject):
             self._framegrabber = None
         self._connected = False
         self.connected_signal.emit(False)
+
+    def _auto_nuc_due(self, now: float) -> bool:
+        """Return True when the configured auto-NUC interval has elapsed."""
+        return self._auto_nuc_enabled and (now - self._last_nuc_time) >= self._nuc_interval
 
     def _execute_nuc(self):
         """Execute manual NUC synchronously."""
@@ -365,7 +553,7 @@ class CameraWorker(QObject):
 
         try:
             current = self._focus_get("FLK_TI_ControlFeature_CurrentFocusDistanceMm")
-            step = 250 * direction
+            step = int(self._config.get("focus", "step_mm")) * direction
             target = current + step
 
             min_focus = self._focus_get("FLK_TI_ControlFeature_FocusDistanceMm_Min")
@@ -433,15 +621,21 @@ class HALCONDisplayWidget(QWidget):
         (4.00, "400%"),
     ]
     _ROI_COLOR = "#EACE21"
+    _ALARM_COLOR = "#FF0000"
 
-    def __init__(self, parent=None):
+    def __init__(self, config: Optional[ConfigManager] = None, parent=None):
         super().__init__(parent)
+        self._config = config if config is not None else ConfigManager()
         self._window_handle = None
         self._image_width = FEED_W
         self._image_height = FEED_H
-        self._zoom_index = 2  # 100%
+        self._palette = str(self._config.get("display", "palette"))
+        self._zoom_index = self._zoom_index_for(
+            self._config.get("display", "default_zoom")
+        )
         self._roi_names = []
         self._roi_coords = []
+        self._active_alarms = set()
         self._last_frame = None
         self._last_statistics = []
         self._zoom_old_size = None
@@ -456,6 +650,15 @@ class HALCONDisplayWidget(QWidget):
     @property
     def zoom_text(self) -> str:
         return self.ZOOM_LEVELS[self._zoom_index][1]
+
+    @staticmethod
+    def _zoom_index_for(default_zoom) -> int:
+        """Map a configured zoom percentage to the ZOOM_LEVELS index."""
+        target = int(default_zoom)
+        for i, (_, label) in enumerate(HALCONDisplayWidget.ZOOM_LEVELS):
+            if int(label.rstrip("%")) == target:
+                return i
+        return 2  # 100%
 
     def _display_size(self) -> Tuple[int, int]:
         w = max(1, int(round(self._image_width * self.zoom_factor)))
@@ -481,9 +684,9 @@ class HALCONDisplayWidget(QWidget):
             ha.set_window_param(self._window_handle, "flush", "true")
             # Thermal palette via HALCON LUT (no manual colorization).
             try:
-                ha.set_lut(self._window_handle, "temperature")
+                ha.set_lut(self._window_handle, self._palette)
             except Exception:
-                logger.warning("HALCON 'temperature' LUT unavailable; using default LUT")
+                logger.warning(f"HALCON LUT '{self._palette}' unavailable; using default LUT")
             ha.set_draw(self._window_handle, "margin")
             ha.set_line_width(self._window_handle, 2)
         except Exception:
@@ -589,7 +792,6 @@ class HALCONDisplayWidget(QWidget):
             ha.disp_obj(halcon_image, self._window_handle)
 
             if self._roi_names and self._roi_coords:
-                ha.set_color(self._window_handle, self._ROI_COLOR)
                 ha.set_draw(self._window_handle, "margin")
                 ha.set_line_width(self._window_handle, 2)
 
@@ -598,11 +800,13 @@ class HALCONDisplayWidget(QWidget):
                         idx = self._roi_names.index(stat.name)
                         if idx >= 0 and idx < len(self._roi_coords):
                             y1, x1, y2, x2 = self._roi_coords[idx]
+                            color = self._ALARM_COLOR if stat.name in self._active_alarms else self._ROI_COLOR
+                            ha.set_color(self._window_handle, color)
                             ha.disp_rectangle1(self._window_handle, y1, x1, y2, x2)
 
                             label = f"{stat.name}: {stat.mean:.1f}°C"
                             ha.disp_text(self._window_handle, label, "image",
-                                         y1 - 15, x1, self._ROI_COLOR, [], [])
+                                         y1 - 15, x1, color, [], [])
                     except ValueError:
                         pass
 
@@ -610,6 +814,10 @@ class HALCONDisplayWidget(QWidget):
 
         except Exception:
             logger.exception("Display error")
+
+    def set_active_alarms(self, names: List[str]):
+        """Store which ROIs are in alarm so outlines/labels turn red."""
+        self._active_alarms = set(names)
 
     def set_roi_data(self, names: List[str], coords: List[Tuple]):
         """Store ROI data for display."""
@@ -628,8 +836,9 @@ class HALCONDisplayWidget(QWidget):
 class MainWindow(QMainWindow):
     """Main application window."""
 
-    def __init__(self):
+    def __init__(self, config: Optional[ConfigManager] = None):
         super().__init__()
+        self._config = config if config is not None else ConfigManager()
         self.setWindowTitle("HALCON ROI Validation Tool - TV46L")
         self.resize(1000, 900)
 
@@ -637,6 +846,12 @@ class MainWindow(QMainWindow):
         self._worker_thread = None
         self._current_temp_frame = None
         self._camera_info = None
+
+        self._active_alarm_count = 0
+        self._nuc_remaining = -1
+        self._alarm_limit = float(self._config.get("alarm", "temperature_limit"))
+        self._alarm_rows = {}
+        self._alarm_max_shown = {}
 
         self._setup_ui()
         self._discover_and_connect()
@@ -652,7 +867,7 @@ class MainWindow(QMainWindow):
         self._create_toolbar(main_layout)
         self._create_image_area(main_layout)
         self._create_mouse_temp(main_layout)
-        self._create_roi_table(main_layout)
+        self._create_lower_section(main_layout)
         self._create_event_log(main_layout)
         self._create_status_bar()
 
@@ -712,7 +927,7 @@ class MainWindow(QMainWindow):
             "QScrollArea { background: #1E1E1E; border: 1px solid #3C3C3C; }"
             "QScrollArea > QWidget > QWidget { background: #1E1E1E; }"
         )
-        self.display_widget = HALCONDisplayWidget()
+        self.display_widget = HALCONDisplayWidget(self._config)
         self.display_widget.zoom_changed.connect(self._on_zoom_changed)
         self.scroll_area.setWidget(self.display_widget)
         parent_layout.addWidget(self.scroll_area, stretch=3)
@@ -724,8 +939,20 @@ class MainWindow(QMainWindow):
         self.lbl_mouse_temp.setStyleSheet("padding: 4px; background: #252526; border: 1px solid #3C3C3C;")
         parent_layout.addWidget(self.lbl_mouse_temp)
 
-    def _create_roi_table(self, parent_layout):
-        """Create ROI statistics table - dynamically sized."""
+    def _create_lower_section(self, parent_layout):
+        """Bottom section: Alarm Table (left, ~28%) + ROI Statistics Table (right)."""
+        lower = QHBoxLayout()
+        lower.setSpacing(8)
+
+        self.alarm_table = QTableWidget(0, 3)
+        self.alarm_table.setHorizontalHeaderLabels(["ROI", "Time", "Current Max (°C)"])
+        self.alarm_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.alarm_table.verticalHeader().setVisible(False)
+        self.alarm_table.setAlternatingRowColors(True)
+        self.alarm_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.alarm_table.setMaximumHeight(350)
+        lower.addWidget(self.alarm_table, 2)  # ~28%
+
         self.roi_table = QTableWidget(0, 6)  # 0 rows initially, will be set dynamically
         self.roi_table.setHorizontalHeaderLabels(["ROI", "Mean (°C)", "Min (°C)", "Max (°C)", "Range (°C)", "Deviation"])
         self.roi_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -733,7 +960,9 @@ class MainWindow(QMainWindow):
         self.roi_table.setAlternatingRowColors(True)
         self.roi_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.roi_table.setMaximumHeight(350)
-        parent_layout.addWidget(self.roi_table)
+        lower.addWidget(self.roi_table, 5)  # ~72%
+
+        parent_layout.addLayout(lower)
 
     def _create_event_log(self, parent_layout):
         """Create event log area."""
@@ -751,7 +980,8 @@ class MainWindow(QMainWindow):
         self._last_proc_time = 0.0
         self.status_bar.showMessage(
             f"Disconnected | FPS: 0.0 | Processing: 0.0 ms | Frame: 0 ms | "
-            f"{FEED_W} x {FEED_H} | Zoom: {self.display_widget.zoom_text}"
+            f"{FEED_W} x {FEED_H} | Zoom: {self.display_widget.zoom_text} | "
+            f"Active Alarms: 0 | Alarm Limit: {self._alarm_limit:.1f} °C"
         )
 
     def _discover_and_connect(self):
@@ -775,7 +1005,7 @@ class MainWindow(QMainWindow):
             self._log("No camera info available")
             return
 
-        self._worker = CameraWorker(self._camera_info)
+        self._worker = CameraWorker(self._camera_info, self._config)
         self._worker_thread = QThread()
         self._worker.moveToThread(self._worker_thread)
 
@@ -785,6 +1015,8 @@ class MainWindow(QMainWindow):
         self._worker.connected_signal.connect(self._on_connected)
         self._worker.nuc_status.connect(self._on_nuc_status)
         self._worker.focus_status.connect(self._on_focus_status)
+        self._worker.alarms_changed.connect(self._on_alarms_changed)
+        self._worker.nuc_countdown.connect(self._on_nuc_countdown)
 
         # Worker owns the acquisition loop. When run() returns it emits
         # finished; the thread then quits and cleans up its own objects.
@@ -842,6 +1074,7 @@ class MainWindow(QMainWindow):
 
         self.display_widget.display_frame(temp_numpy, statistics, proc_time_ms)
         self._update_roi_table(statistics)
+        self._update_alarm_max_cells(statistics)
         self._update_status_bar(proc_time_ms)
 
     def _on_zoom_changed(self):
@@ -891,6 +1124,7 @@ class MainWindow(QMainWindow):
         self.btn_nuc.setEnabled(connected)
         self.btn_benchmark.setEnabled(connected)
         if connected and self._worker:
+            self._clear_alarm_table()
             self.display_widget.set_roi_data(self._worker._roi_names, self._worker._roi_coords)
             self._resize_roi_table()
 
@@ -923,14 +1157,79 @@ class MainWindow(QMainWindow):
             self.roi_table.setItem(i, 5, QTableWidgetItem(f"{stat.deviation:.2f}"))
 
     def _update_status_bar(self, proc_time_ms: float):
-        """Update status bar with FPS, processing time, frame time, image size, zoom."""
-        fps_text = "9.0"  # TV46L fixed 9 FPS
-        frame_time_ms = 111.1  # 1000/9
+        """Update status bar with FPS, processing, frame, size, zoom, alarms, NUC."""
+        fps = int(self._config.get("camera", "fps"))
+        frame_time_ms = 1000.0 / fps
+        nuc_text = f"Next NUC: {self._nuc_remaining} s" if self._nuc_remaining >= 0 else "Next NUC: -"
         self.status_bar.showMessage(
-            f"Connected | FPS: {fps_text} | Processing: {proc_time_ms:.2f} ms | "
+            f"Connected | FPS: {fps}.0 | Processing: {proc_time_ms:.2f} ms | "
             f"Frame: {frame_time_ms:.1f} ms | {FEED_W} x {FEED_H} | "
-            f"Zoom: {self.display_widget.zoom_text}"
+            f"Zoom: {self.display_widget.zoom_text} | "
+            f"Active Alarms: {self._active_alarm_count} | {nuc_text} | "
+            f"Alarm Limit: {self._alarm_limit:.1f} °C"
         )
+
+    def _on_alarms_changed(self, alarms: List[Alarm]):
+        """Reconcile alarm table and ROI colors when alarm state changes."""
+        active = {a.roi_name for a in alarms}
+        self._active_alarm_count = len(alarms)
+        self.display_widget.set_active_alarms(active)
+        self._sync_alarm_table(alarms)
+        self._update_status_bar(self._last_proc_time)
+
+    def _on_nuc_countdown(self, seconds: int):
+        """Receive the auto-NUC countdown (once per second from the worker)."""
+        self._nuc_remaining = seconds
+
+    def _sync_alarm_table(self, alarms: List[Alarm]):
+        """Insert/remove rows so the alarm table mirrors the active set."""
+        current = {a.roi_name: a for a in alarms}
+
+        removed = [n for n in list(self._alarm_rows) if n not in current]
+        for name in removed:
+            row = self._alarm_rows.pop(name)
+            self.alarm_table.removeRow(row)
+            self._alarm_max_shown.pop(name, None)
+            for other, other_row in list(self._alarm_rows.items()):
+                if other_row > row:
+                    self._alarm_rows[other] = other_row - 1
+
+        for name, alarm in current.items():
+            if name in self._alarm_rows:
+                continue
+            row = self.alarm_table.rowCount()
+            self.alarm_table.insertRow(row)
+            self.alarm_table.setItem(row, 0, QTableWidgetItem(alarm.roi_name))
+            self.alarm_table.setItem(
+                row, 1,
+                QTableWidgetItem(time.strftime("%H:%M:%S", time.localtime(alarm.timestamp)))
+            )
+            text = f"{alarm.current_max:.1f}"
+            self.alarm_table.setItem(row, 2, QTableWidgetItem(text))
+            self._alarm_rows[name] = row
+            self._alarm_max_shown[name] = text
+
+    def _update_alarm_max_cells(self, statistics: List[ROIStatistics]):
+        """Refresh only the Current Max cell of active alarm rows."""
+        if not self._alarm_rows:
+            return
+        stats_by_name = {s.name: s for s in statistics}
+        for name, row in self._alarm_rows.items():
+            stat = stats_by_name.get(name)
+            if stat is None:
+                continue
+            text = f"{stat.maximum:.1f}"
+            if self._alarm_max_shown.get(name) != text:
+                self.alarm_table.setItem(row, 2, QTableWidgetItem(text))
+                self._alarm_max_shown[name] = text
+
+    def _clear_alarm_table(self):
+        """Clear all alarm rows and active-alarm coloring (e.g. on reconnect)."""
+        self.alarm_table.setRowCount(0)
+        self._alarm_rows = {}
+        self._alarm_max_shown = {}
+        self._active_alarm_count = 0
+        self.display_widget.set_active_alarms([])
 
     def _log(self, msg: str):
         """Add message to event log."""
@@ -948,22 +1247,28 @@ class MainWindow(QMainWindow):
                 self.lbl_mouse_temp.setText(f"Mouse X: {x}  Y: {y}  Temperature: {temp:.2f}°C")
 
     def _shutdown_thread(self):
-        """Ask the worker to stop and wait for the thread to exit.
+        """Stop the worker and join its thread before the window closes.
 
-        stop() flips the running flag; run() returns, runs cleanup and
-        emits finished which quits the thread. The wait() call guarantees
-        the QThread object is fully stopped before the window closes.
+        Order: worker.stop() (flip flag -> run() exits), thread.quit(),
+        thread.wait(). Only null the references after the thread has
+        actually finished, so we never destroy a still-running QThread.
         """
         if not self._worker_thread:
             return
+        if self._worker:
+            self._worker.stop()
         self._worker_thread.quit()
-        self._worker_thread.wait(3000)
+        joined = self._worker_thread.wait(5000)
+        if not joined:
+            logger.warning(
+                "Worker thread did not exit within 5s; keeping it alive to "
+                "avoid destroying a running QThread"
+            )
+            return
         self._worker = None
         self._worker_thread = None
 
     def closeEvent(self, event: QCloseEvent):
-        if self._worker:
-            self._worker.stop()
         self._shutdown_thread()
         event.accept()
 
@@ -971,6 +1276,8 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+
+    config = ConfigManager()
 
     dark_palette = app.palette()
     dark_palette.setColor(dark_palette.ColorRole.Window, QColor(0x1E, 0x1E, 0x1E))
@@ -987,7 +1294,7 @@ def main():
     dark_palette.setColor(dark_palette.ColorRole.HighlightedText, QColor(0xFF, 0xFF, 0xFF))
     app.setPalette(dark_palette)
 
-    window = MainWindow()
+    window = MainWindow(config)
     window.display_widget.mouse_moved.connect(window._on_mouse_move)
     window.show()
 

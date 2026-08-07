@@ -1,3 +1,48 @@
+## 2026-08-07 15:30
+### What changed
+- Fixed `AlarmManager` API mismatch in `halcon_roi_validation.py`. `active_alarms` is a `@property`, but the worker called `self._alarm_manager.active_alarms()` (with parens) in `run()` at the set-diff check and the `alarms_changed.emit(...)` call, raising `TypeError: 'list' object is not callable` before the loop. Now calls use the property with no parens; single interface throughout.
+- Frame-processing exceptions no longer disconnect/reconnect the camera. The old `except` block called `_handle_disconnect()`, which set `_connected=False`, so the loop's reconnect branch re-ran `initialize()` and recreated calibration/LUT/ROI regions/connection on every bad frame. Now an exception only logs, skips the frame, and continues; initialization happens once.
+- Hardened shutdown order in `_shutdown_thread()` -> `worker.stop()` -> `thread.quit()` -> `thread.wait(5000)`; references are nulled only after the thread actually joins. If it cannot join within 5s a warning is logged and the QThread is NOT dropped, so it is never destroyed while still running. `closeEvent` now delegates to `_shutdown_thread`.
+### Why
+- Crash on startup (`'list' object is not callable`), repeated re-initialization churn, and `QThread: Destroyed while thread is still running` at exit.
+### Notes
+- Verified: no `.active_alarms()` call remains (only the `def` and `set_active_alarms()` remain). Headless stub test all-PASS incl. property read via `CameraWorker` + set-diff path. `ruff check` + `py_compile` clean. pytest 518 passed / 8 failed (same pre-existing baseline). Live camera needed to confirm no restart churn and clean exit on hardware.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
+## 2026-08-07 15:00
+### What changed
+- Part 2 GUI integration in `halcon_roi_validation.py` (acquisition/ROI/AlarmManager/HALCON pipeline untouched).
+- Bottom section is now a horizontal pair: Alarm Table (left, ~28%) + ROI Statistics Table (right, ~72%). No popup/dock/tab; both live inside the existing main window. Alarm table has 3 columns only: ROI, Time (HH:MM:SS), Current Max (°C).
+- Alarm table mirrors live alarms: inserts a row on activation, removes the row immediately on clear, and per frame updates only the "Current Max" cell while active (no full-table rebuild per frame, timestamp untouched).
+- Worker now emits `alarms_changed` only when the active-alarm set changes, and `nuc_countdown` once per second. GUI updated via web: `_on_alarms_changed`/`_sync_alarm_table`/`_update_alarm_max_cells`/`_on_nuc_countdown`.
+- ROI outlines and labels turn red while an ROI is in alarm, back to yellow on clear (color change only; no region rebuild, no flashing).
+- Status bar now also shows `Active Alarms: N`, `Next NUC: <s>` (1/s), and `Alarm Limit: X °C` taken directly from `config.json`.
+### Why
+- Make active alarms visible at a glance: live table, red ROI, red text, and a count in the status bar, without touching the processing or alarm engine.
+### Notes
+- Verified offline with headless stubs: 25 checks pass (insert rows, no duplicate rows on repeat, timestamp fixed while active, per-cell Current Max update, immediate row removal on clear, re-alarm after clear, countdown, alarm limit from config, disabled-NUC dash, display active set). `ruff check` + `py_compile` clean. Full pytest 518 passed / 8 failed — same 8 pre-existing failures as baseline. Live FPS/screenshot verification still requires a connected TV46L.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
+## 2026-08-07 14:00
+### What changed
+- Added a configuration system to the HALCON ROI validation tool (`halcon_roi_validation.py` + new `config.json`). All tunables now come from `config.json` (camera FPS/reconnect, alarm limit, NUC interval, focus step, display palette/zoom). Loaded once at startup by `ConfigManager` and held in memory; the JSON file is never read inside the processing loop.
+- Added `AlarmManager` (two-state engine per ROI: NORMAL <-> ACTIVE). Creates exactly one alarm when ROI Max > limit, stores the creation timestamp once, refreshes only `current_max` while active, clears when Max <= limit, and creates a fresh alarm (new timestamp) only after a clear. Alarm data: ROI name, timestamp, current max. Active alarms exposed via `active_alarms`.
+- Pipeline now evaluates alarms straight from the existing `ROIStatistics` (grab -> calibration -> intensity -> min_max_gray -> evaluate AlarmManager). No recomputation, no extra HALCON call, no extra image pass.
+- Automatic NUC: reads `nuc.interval_seconds` / `nuc.auto_enabled`, tracks `last_nuc_time`, and when the interval elapses runs the exact same `_execute_nuc()` used by the Manual NUC button. Manual NUC still works and also refreshes the timer.
+- Focus step, reconnect delay, FPS, LUT palette, and default zoom now read from config instead of hardcoded values. Removed two pre-existing unused imports (`QHBoxLayout`, `QMessageBox`) so ruff passes.
+### Why
+- Part 1 of the configuration + alarm engine work: centralize all future-changeable values in `config.json`, and move alarm state logic into a single small class instead of scattering it through the GUI. Manual NUC code reused for auto-NUC to avoid duplication.
+### Notes
+- Verified with an offline stub test (config load, no duplicate alarms, constant timestamp while active, auto-clear, new alarm only after clear, auto-NUC interval) — all pass. `ruff check` and `py_compile` clean. Full pytest: 518 passed, 8 failed — same 8 pre-existing failures present on the clean baseline (unrelated `halcon.HRegion` API and alarm-pipeline tests). Requires a live TV46L to verify NUC and FPS on hardware.
+### Files Changed
+- halcon_roi_validation.py
+- config.json
+- CHANGELOG.md
+
 ## 2026-08-07 12:00
 ### What changed
 - Improved HALCON ROI validation GUI display quality in `halcon_roi_validation.py` (display-only; no processing/camera/threading changes).
