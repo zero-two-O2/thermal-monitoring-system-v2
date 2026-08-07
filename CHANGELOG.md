@@ -1,3 +1,19 @@
+## 2026-08-07 12:00
+### What changed
+- Improved HALCON ROI validation GUI display quality in `halcon_roi_validation.py` (display-only; no processing/camera/threading changes).
+- Image no longer stretched to fill the widget. HALCON display widget now lives inside a `QScrollArea`; at 100% zoom one image pixel = one display pixel (640x480, none scaled).
+- Added zoom (50/75/100/125/150/200/400%) by resizing the display window only; underlying frame stays 640x480. Ctrl+Mouse Wheel zooms, plain Mouse Wheel scrolls (QScrollArea), zoom center preserved.
+- Added HALCON thermal palette via `ha.set_lut(window, "temperature")` (verified valid in HALCON 24.11); no OpenCV/NumPy colorization, display stays a HALCON image.
+- ROI color changed to yellow `#EACE21` for visibility on the thermal palette; borders stay crisp (no anti-alias) because display is no longer scaled. Labels still use HALCON `disp_text` in image coordinates.
+- Status bar now shows current zoom (e.g. `Zoom: 150%`).
+### Why
+- Previously the thermal image was scaled to fill the widget, making the image, ROI rectangles, and text blurry, and grayscale LUT looked non-thermal. Zoom needed for closer inspection.
+### Notes
+- Palette name `temperature` verified present in `HALCON-24.11` (valid list: temperature, rainbow, jet, color1, default; iron unavailable in this version). No extra HALCON stats or image copies added to runtime loop; zoom re-renders only the stored last frame on user zoom action.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
 ## 2026-08-07 10:00
 ### What changed
 - Fixed app-crash-on-exit (`QThread: Destroyed while thread is still running`) in `halcon_roi_validation.py`.

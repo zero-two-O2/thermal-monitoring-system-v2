@@ -31,11 +31,12 @@ from dataclasses import dataclass
 
 import halcon as ha
 import numpy as np
-from PyQt6.QtCore import (QThread, pyqtSignal, QObject, QTimer, QMutex)
+from PyQt6.QtCore import (QThread, pyqtSignal, QObject, QTimer, QMutex, Qt)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QLabel, QPushButton, QTableWidget,
                               QTableWidgetItem, QTextEdit, QStatusBar,
-                              QToolBar, QHeaderView, QMessageBox)
+                              QToolBar, QHeaderView, QMessageBox, QScrollArea,
+                              QSizePolicy)
 from PyQt6.QtGui import QFont, QColor, QCloseEvent
 
 from calibration.calibration_manager import CalibrationManager
@@ -412,56 +413,156 @@ class CameraWorker(QObject):
 
 
 class HALCONDisplayWidget(QWidget):
-    """Widget that embeds a HALCON window for display."""
+    """Widget that embeds a HALCON window for display.
+
+    The widget is sized exactly to (image size x zoom). At 100% zoom the
+    HALCON window is 640x480 so one image pixel equals one display pixel.
+    Zoom only changes the window size; the underlying frame stays 640x480.
+    """
 
     mouse_moved = pyqtSignal(int, int)
+    zoom_changed = pyqtSignal()
+
+    ZOOM_LEVELS = [
+        (0.50, "50%"),
+        (0.75, "75%"),
+        (1.00, "100%"),
+        (1.25, "125%"),
+        (1.50, "150%"),
+        (2.00, "200%"),
+        (4.00, "400%"),
+    ]
+    _ROI_COLOR = "#EACE21"
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._window_handle = None
         self._image_width = FEED_W
         self._image_height = FEED_H
-        self.setMinimumSize(FEED_W, FEED_H)
+        self._zoom_index = 2  # 100%
+        self._roi_names = []
+        self._roi_coords = []
+        self._last_frame = None
+        self._last_statistics = []
+        self._zoom_old_size = None
         self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._apply_zoom_size()
+
+    @property
+    def zoom_factor(self) -> float:
+        return self.ZOOM_LEVELS[self._zoom_index][0]
+
+    @property
+    def zoom_text(self) -> str:
+        return self.ZOOM_LEVELS[self._zoom_index][1]
+
+    def _display_size(self) -> Tuple[int, int]:
+        w = max(1, int(round(self._image_width * self.zoom_factor)))
+        h = max(1, int(round(self._image_height * self.zoom_factor)))
+        return w, h
+
+    def _apply_zoom_size(self):
+        w, h = self._display_size()
+        self.setFixedSize(w, h)
 
     def create_window(self):
         """Create HALCON window embedded in this widget."""
-        if self._window_handle is None:
+        if self._window_handle is not None:
+            return
+        try:
+            w, h = self._display_size()
+            self._window_handle = ha.open_window(
+                0, 0, w, h,
+                int(self.winId()), "visible", ""
+            )
+            ha.set_part(self._window_handle, 0, 0,
+                        self._image_height - 1, self._image_width - 1)
+            ha.set_window_param(self._window_handle, "flush", "true")
+            # Thermal palette via HALCON LUT (no manual colorization).
             try:
-                self._window_handle = ha.open_window(
-                    0, 0, self.width(), self.height(),
-                    int(self.winId()), "visible", ""
-                )
-                ha.set_part(self._window_handle, 0, 0, self._image_height - 1, self._image_width - 1)
-                ha.set_window_param(self._window_handle, "flush", "true")
-            except Exception as e:
-                logger.exception("Failed to create HALCON window")
+                ha.set_lut(self._window_handle, "temperature")
+            except Exception:
+                logger.warning("HALCON 'temperature' LUT unavailable; using default LUT")
+            ha.set_draw(self._window_handle, "margin")
+            ha.set_line_width(self._window_handle, 2)
+        except Exception:
+            logger.exception("Failed to create HALCON window")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self._window_handle:
             try:
-                ha.set_window_extents(self._window_handle, 0, 0, self.width(), self.height())
-                ha.set_part(self._window_handle, 0, 0, self._image_height - 1, self._image_width - 1)
+                w, h = self._display_size()
+                ha.set_window_extents(self._window_handle, 0, 0, w, h)
+                ha.set_part(self._window_handle, 0, 0,
+                            self._image_height - 1, self._image_width - 1)
             except Exception:
                 pass
 
+    def set_zoom_index(self, index: int):
+        """Change zoom level; the underlying frame stays 640x480."""
+        if not 0 <= index < len(self.ZOOM_LEVELS):
+            return
+        if index == self._zoom_index:
+            return
+        self._zoom_old_size = self.size()
+        self._zoom_index = index
+        self._apply_zoom_size()
+        if self._window_handle:
+            try:
+                w, h = self._display_size()
+                ha.set_window_extents(self._window_handle, 0, 0, w, h)
+                ha.set_part(self._window_handle, 0, 0,
+                            self._image_height - 1, self._image_width - 1)
+            except Exception:
+                pass
+        if self._last_frame is not None:
+            self._draw()
+        self.zoom_changed.emit()
+
+    def zoom_in(self):
+        self.set_zoom_index(min(self._zoom_index + 1, len(self.ZOOM_LEVELS) - 1))
+
+    def zoom_out(self):
+        self.set_zoom_index(max(self._zoom_index - 1, 0))
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.zoom_in()
+            elif delta < 0:
+                self.zoom_out()
+            event.accept()
+        else:
+            # Without Ctrl, let the QScrollArea handle scrolling.
+            event.ignore()
+
     def mouseMoveEvent(self, event):
-        x = int(event.position().x() * self._image_width / self.width())
-        y = int(event.position().y() * self._image_height / self.height())
+        x = int(event.position().x() / self.zoom_factor)
+        y = int(event.position().y() / self.zoom_factor)
         x = max(0, min(self._image_width - 1, x))
         y = max(0, min(self._image_height - 1, y))
         self.mouse_moved.emit(x, y)
 
     def display_frame(self, temp_numpy, statistics: List[ROIStatistics], proc_time_ms: float):
         """Display frame with ROI overlays using HALCON operators only."""
+        self._last_frame = temp_numpy
+        self._last_statistics = statistics
+        self._draw()
+
+    def _draw(self):
+        """Render the stored frame with ROI overlays using HALCON operators only."""
         if self._window_handle is None:
             self.create_window()
-        if self._window_handle is None:
+        if self._window_handle is None or self._last_frame is None:
             return
 
         try:
-            # Convert temperature to 8-bit display image (grayscale)
+            # Convert temperature to 8-bit display image (grayscale);
+            # HALCON applies the 'temperature' LUT at display time.
+            temp_numpy = self._last_frame
             finite = np.isfinite(temp_numpy)
             if not np.any(finite):
                 display = np.zeros(temp_numpy.shape, dtype=np.uint8)
@@ -481,19 +582,18 @@ class HALCONDisplayWidget(QWidget):
             # Create HALCON image from 8-bit display
             halcon_image = ha.himage_from_numpy_array(display)
 
-            # Set part for proper scaling
-            h, w = display.shape[:2]
-            ha.set_part(self._window_handle, 0, 0, h - 1, w - 1)
+            ha.set_part(self._window_handle, 0, 0,
+                        self._image_height - 1, self._image_width - 1)
 
             ha.clear_window(self._window_handle)
             ha.disp_obj(halcon_image, self._window_handle)
 
-            if hasattr(self, '_roi_names') and hasattr(self, '_roi_coords'):
-                ha.set_color(self._window_handle, "spring green")
+            if self._roi_names and self._roi_coords:
+                ha.set_color(self._window_handle, self._ROI_COLOR)
                 ha.set_draw(self._window_handle, "margin")
                 ha.set_line_width(self._window_handle, 2)
 
-                for stat in statistics:
+                for stat in self._last_statistics:
                     try:
                         idx = self._roi_names.index(stat.name)
                         if idx >= 0 and idx < len(self._roi_coords):
@@ -501,14 +601,14 @@ class HALCONDisplayWidget(QWidget):
                             ha.disp_rectangle1(self._window_handle, y1, x1, y2, x2)
 
                             label = f"{stat.name}: {stat.mean:.1f}°C"
-                            ha.set_color(self._window_handle, "spring green")
-                            ha.disp_text(self._window_handle, label, "image", y1 - 15, x1, "spring green", [], [])
+                            ha.disp_text(self._window_handle, label, "image",
+                                         y1 - 15, x1, self._ROI_COLOR, [], [])
                     except ValueError:
                         pass
 
             ha.flush_buffer(self._window_handle)
 
-        except Exception as e:
+        except Exception:
             logger.exception("Display error")
 
     def set_roi_data(self, names: List[str], coords: List[Tuple]):
@@ -604,9 +704,18 @@ class MainWindow(QMainWindow):
         parent_layout.addWidget(toolbar)
 
     def _create_image_area(self, parent_layout):
-        """Create live thermal image display area."""
+        """Create live thermal image display area inside a scrollable viewer."""
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(False)
+        self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scroll_area.setStyleSheet(
+            "QScrollArea { background: #1E1E1E; border: 1px solid #3C3C3C; }"
+            "QScrollArea > QWidget > QWidget { background: #1E1E1E; }"
+        )
         self.display_widget = HALCONDisplayWidget()
-        parent_layout.addWidget(self.display_widget, stretch=3)
+        self.display_widget.zoom_changed.connect(self._on_zoom_changed)
+        self.scroll_area.setWidget(self.display_widget)
+        parent_layout.addWidget(self.scroll_area, stretch=3)
 
     def _create_mouse_temp(self, parent_layout):
         """Create mouse temperature readout."""
@@ -639,7 +748,11 @@ class MainWindow(QMainWindow):
         """Create status bar."""
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("Disconnected | FPS: 0.0 | Processing: 0.0 ms | Frame: 0 ms | 640 x 480")
+        self._last_proc_time = 0.0
+        self.status_bar.showMessage(
+            f"Disconnected | FPS: 0.0 | Processing: 0.0 ms | Frame: 0 ms | "
+            f"{FEED_W} x {FEED_H} | Zoom: {self.display_widget.zoom_text}"
+        )
 
     def _discover_and_connect(self):
         """Discover cameras and connect to first TV46L."""
@@ -725,10 +838,30 @@ class MainWindow(QMainWindow):
     def _on_frame_ready(self, temp_numpy, statistics: List[ROIStatistics], proc_time_ms: float):
         """Handle new frame from worker."""
         self._current_temp_frame = temp_numpy
+        self._last_proc_time = proc_time_ms
 
         self.display_widget.display_frame(temp_numpy, statistics, proc_time_ms)
         self._update_roi_table(statistics)
         self._update_status_bar(proc_time_ms)
+
+    def _on_zoom_changed(self):
+        """Handle zoom change from the display widget."""
+        self._update_status_bar(self._last_proc_time)
+        QTimer.singleShot(0, self._recenter_scroll)
+
+    def _recenter_scroll(self):
+        """Keep the zoom center point fixed when the widget resizes."""
+        old = self.display_widget._zoom_old_size
+        if not old or old.width() <= 0 or old.height() <= 0:
+            return
+        hbar = self.scroll_area.horizontalScrollBar()
+        vbar = self.scroll_area.verticalScrollBar()
+        center_x = hbar.value() + hbar.pageStep() / 2.0
+        center_y = vbar.value() + vbar.pageStep() / 2.0
+        scale_x = self.display_widget.width() / old.width()
+        scale_y = self.display_widget.height() / old.height()
+        hbar.setValue(int(center_x * scale_x - hbar.pageStep() / 2.0))
+        vbar.setValue(int(center_y * scale_y - vbar.pageStep() / 2.0))
 
     def _on_error(self, msg: str):
         self._log(f"ERROR: {msg}")
@@ -790,12 +923,13 @@ class MainWindow(QMainWindow):
             self.roi_table.setItem(i, 5, QTableWidgetItem(f"{stat.deviation:.2f}"))
 
     def _update_status_bar(self, proc_time_ms: float):
-        """Update status bar with FPS, processing time, frame time, image size."""
+        """Update status bar with FPS, processing time, frame time, image size, zoom."""
         fps_text = "9.0"  # TV46L fixed 9 FPS
         frame_time_ms = 111.1  # 1000/9
         self.status_bar.showMessage(
             f"Connected | FPS: {fps_text} | Processing: {proc_time_ms:.2f} ms | "
-            f"Frame: {frame_time_ms:.1f} ms | {FEED_W} x {FEED_H}"
+            f"Frame: {frame_time_ms:.1f} ms | {FEED_W} x {FEED_H} | "
+            f"Zoom: {self.display_widget.zoom_text}"
         )
 
     def _log(self, msg: str):
