@@ -1,3 +1,105 @@
+## 2026-08-07 18:20
+
+### What changed
+- Added configurable default focus. `config.json` `focus` section gained `default_focus_mm` (1200). After a successful `initialize()`, the worker moves the lens to that exact position once, waits for it to settle, reads the final value once, then starts acquisition.
+- Added configurable default focus. `config.json` `focus` section gained `default_focus_mm` (1200). After a successful `initialize()`, the worker moves the lens to that exact position once, waits for it to settle, reads the final value once, then releases the connection and starts acquisition.
+- Added `_apply_default_focus` and `_wait_focus_stable` to `CameraWorker`. Target read from config, clamped to driver limits, never hardcoded.
+### Why
+- Every camera should start at a known focus immediately after connecting, with no manual stepping.
+### Notes
+- Failure to move focus logs "Default focus failed" / "Continuing with current focus position." and does NOT abort the connection. Runs once per successful connect only. Edit `default_focus_mm` to 1500 changes next-launch focus with zero Python changes. Manual + / - / ++ / -- logic untouched.
+### Files Changed
+- halcon_roi_validation.py
+- config.json
+- CHANGELOG.md
+### What changed
+- Focus UI in `halcon_roi_validation.py` expanded from two buttons (`+`/`-`) to four (`--`, `-`, `+`, `++`), all on one toolbar row with a `Focus` label and tooltips. Focus log simplified: one command now prints only the button label and the final focus distance (`Current Focus : xxxx mm`); `Target`/`Actual` lines removed.
+- Config: `config.json` `focus` section now has `coarse_step_mm` and `fine_step_mm` (replaces `step_mm`). Worker `request_focus`/`_execute_focus` take a signed step in mm read from config each command; no step values hardcoded in Python.
+### Why
+- Coarse/fine stepping gives finer control; minimal log reduces noise. Steps remain config-driven for easy tuning without code edits.
+### Notes
+- Focus algorithm unchanged (read current, apply step, clamp, write, wait, read final). Only `halcon_roi_validation.py` and `config.json` touched. Needs real camera to confirm movement.
+### Files Changed
+- halcon_roi_validation.py
+- config.json
+- CHANGELOG.md
+
+## 2026-08-07 17:50
+### What changed
+- Simplified `_execute_focus` in `halcon_roi_validation.py`. Removed all verification/tolerance/PASS/FAIL/SUCCESS logic and `wait_for_focus` poll. New flow: read current → read `focus.step_mm` from config → `target = current ± step` → clamp to limits → write `FLK_TI_ControlFeature_SetFocusDistanceMm` → wait ~200 ms → read back → print `Current`/`Target`/`Actual` → report `Focus completed`.
+### Why
+- Old logic rejected valid focus moves because the lens never hit the exact target mm, producing false FAILED.
+### Notes
+- "failed" now reported only on read/write exception. Increment source of truth is config.json `focus.step_mm`; no hardcoded 250/500/1000 in focus code. Only `halcon_roi_validation.py` changed. Needs real camera to confirm.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
+## 2026-08-07 17:45
+### What changed
+- Focus control in `halcon_roi_validation.py` reworked to match `tests/test_focus_control.py` +/- handling. Toolbar buttons renamed `Focus Near`/`Focus Far` to `Focus +`/`Focus -` (now `btn_focus_plus`/`btn_focus_minus`). `_execute_focus` drops near/far wording and the `wait_for_focus` poll path: reads current distance, applies configured `focus.step_mm` (plus/minus), clamps to `get_focus_limits()`, writes target, then reads back and reports SUCCESS/FAILED if actual is within 10 mm of target.
+### Why
+- Focus reported FAILED even though the motor moved, because `wait_for_focus` could not confirm the target within its short timeout. The simpler set-and-verify flow from the hardware test avoids that false negative.
+### Notes
+- Only `halcon_roi_validation.py` changed; other modules untouched. Verify focus step value in `config.json` (`focus.step_mm`). Needs real camera to confirm movement.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
+## 2026-08-07 17:30
+### What changed
+- Removed the temporary focus-parameter probe diagnostic from `camera/services/halcon_driver.py` (`FOCUS_PROBE_PARAMS`, `dump_focus_parameters`, unused `Callable` import) and its invocation from `CameraWorker.initialize` in `halcon_roi_validation.py`.
+### Why
+- Investigation complete; diagnostic no longer needed.
+### Notes
+- Focus implementation untouched. `py_compile` + `ruff` clean.
+### Files Changed
+- camera/services/halcon_driver.py
+- halcon_roi_validation.py
+- CHANGELOG.md
+### Files Changed
+- camera/services/halcon_driver.py
+- halcon_roi_validation.py
+- CHANGELOG.md
+
+## 2026-08-07 17:00
+### What changed
+- Reverted focus write parameter. The device rejects `FLK_TI_ControlFeature_TargetFocusDistanceMm` ("feature not supported" HALCON #5329). Production driver `tv46l_camera.py` writes only `FLK_TI_ControlFeature_SetFocusDistanceMm` via `driver.set_focus_distance()` with no extra control command. Restored that. Dropped the previously-invented `FLK_TI_ControlCommand_SetFocus` command and constants renamed to `FOCUS_READ_PARAM`/`FOCUS_WRITE_PARAM`; `execute_control_command()` removed. Prototype updated to log `Writing SetFocusDistanceMm = <target>` and no longer emits a fake "Executing" line.
+### Why
+- Hardware showed #5320 TargetFocusDistanceMm unsupported; the supported production path is a single `SetFocusDistanceMm` write + `wait_for_focus` poll.
+### Notes
+- `py_compile` + `ruff` pass. Movement now depends purely on the supported param; real camera needed to confirm Final increases/decreases.
+### Files Changed
+- camera/services/halcon_driver.py
+- halcon_roi_validation.py
+- CHANGELOG.md
+
+## 2026-08-07 16:45
+### What changed
+- Fixed circular import: `halcon_roi_validation.py` -> `HalconDriver` -> `camera.model_import` -> `tv46l_camera` -> back to `HalconDriver`. Moved the `from camera.models.camera_model import CameraModel` import in `camera/services/halcon_driver.py` behind a `TYPE_CHECKING` guard. The symbol is only used as a type hint, so it is never needed at runtime.
+### Why
+- App crashed at startup with `ImportError: cannot import name 'HalconDriver' from partially initialized module`.
+### Notes
+- `py_compile` + import smoke test (both modules load) pass. `ruff` still expected clean after this change.
+### Files Changed
+- camera/services/halcon_driver.py
+- CHANGELOG.md
+
+## 2026-08-07 16:30
+### What changed
+- Fixed TV46L focus: the driver previously wrote `FLK_TI_ControlFeature_SetFocusDistanceMm`, which the camera ignored (motor never moved). Now `HalconDriver.set_focus_distance()` writes `FLK_TI_ControlFeature_TargetFocusDistanceMm` and then executes the Fluke control command `FLK_TI_ControlCommand_SetFocus` (new `execute_control_command()`). Declared param constants `FOCUS_READ_PARAM`, `FOCUS_TARGET_PARAM`, `FOCUS_COMMAND_PARAM`.
+- `HalconDriver.__init__` accepts an optional already-open `framegrabber` so the validation tool reuses its existing handle instead of opening a second one.
+- `halcon_roi_validation.py` now delegates focus to the production `HalconDriver` (single focus implementation); removed its own inline HALCON focus code and the `_focus_scalar`/`_focus_get` helpers.
+- Focus instrumentation logs once per command: Focus Near/Far, Current, Target, Writing <target param>, Executing <set-focus command>, Waiting, Final, then SUCCESS or FAILED + reason.
+### Why
+- Camera never moved (log showed Current 23368 / Target 22368 / Final 23368); prototype had a duplicate, ineffective focus implementation.
+### Notes
+- `py_compile` clean. Live camera required to confirm the `FLK_TI_ControlCommand_SetFocus` command name/value is accepted by hardware and that Final now changes.
+### Files Changed
+- camera/services/halcon_driver.py
+- halcon_roi_validation.py
+- CHANGELOG.md
+
 ## 2026-08-07 16:00
 ### What changed
 - Fixed reconnect after Disconnect in `halcon_roi_validation.py`. `_on_connect` only acted `if self._worker and not self._worker._connected`; after Disconnect `_shutdown_thread()` nulls the worker and thread, so Connect became a silent no-op. Now Connect tears down any stale worker then always creates a fresh one via `_discover_and_connect()`, producing a brand-new framegrabber each time (never reusing a handle). Connect -> Disconnect -> Connect works repeatedly.

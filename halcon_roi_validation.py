@@ -26,6 +26,7 @@ import sys
 import time
 import json
 import logging
+from types import SimpleNamespace
 from typing import List, Tuple, Optional, Dict, Callable
 from dataclasses import dataclass
 
@@ -42,6 +43,7 @@ from PyQt6.QtGui import QFont, QColor, QCloseEvent
 from calibration.calibration_manager import CalibrationManager
 from camera.camera_discovery import CameraDiscovery
 from camera.camera_info import CameraInfo
+from camera.services.halcon_driver import HalconDriver
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,7 +91,7 @@ class ConfigManager:
             "use_max_temperature": True,
         },
         "nuc": {"auto_enabled": True, "interval_seconds": 300},
-        "focus": {"step_mm": 250},
+        "focus": {"default_focus_mm": None, "coarse_step_mm": None, "fine_step_mm": None},
         "display": {"palette": "temperature", "default_zoom": 100},
     }
 
@@ -226,13 +228,14 @@ class CameraWorker(QObject):
         self._mutex = QMutex()
         self._framegrabber = None
         self._connected = False
+        self._focus_driver = None
         self._calibration = None
         self._roi_regions = None
         self._roi_names = []
         self._roi_coords = []
         self._nuc_requested = False
         self._focus_requested = False
-        self._focus_direction = 0
+        self._focus_step = 0
         self._reconnect_seconds = float(self._config.get("camera", "reconnect_seconds"))
         self._auto_nuc_enabled = bool(self._config.get("nuc", "auto_enabled"))
         self._nuc_interval = float(self._config.get("nuc", "interval_seconds"))
@@ -255,6 +258,14 @@ class CameraWorker(QObject):
                 "default", self._camera_info.device, 0, -1
             )
 
+            self._focus_driver = HalconDriver(
+                SimpleNamespace(
+                    camera_id=self._camera_info.serial,
+                    device_identifier=self._camera_info.device,
+                ),
+                framegrabber=self._framegrabber,
+            )
+
             self._configure_camera()
 
             ha.grab_image_start(self._framegrabber, -1)
@@ -274,9 +285,14 @@ class CameraWorker(QObject):
 
             self._last_nuc_time = time.time()
 
+            # Default focus is applied exactly once after a successful
+            # connection, before live acquisition starts. A failure here
+            # must not abort the connection.
+            self.log_message.emit("Camera connected")
+            self._apply_default_focus()
+
             self._connected = True
             self.connected_signal.emit(True)
-            self.log_message.emit("Camera connected")
             self.initialized.emit()
             return True
 
@@ -369,11 +385,11 @@ class CameraWorker(QObject):
         self._nuc_requested = True
         self._mutex.unlock()
 
-    def request_focus(self, direction: int):
-        """Request focus near (1) or far (-1)."""
+    def request_focus(self, step_mm: int):
+        """Request a focus move by a signed step (mm); sign sets direction."""
         self._mutex.lock()
         self._focus_requested = True
-        self._focus_direction = direction
+        self._focus_step = step_mm
         self._mutex.unlock()
 
     def _on_alarm_event(self, roi_name: str, active: bool, current_max: float):
@@ -465,7 +481,7 @@ class CameraWorker(QObject):
                     self._execute_nuc()
                     self._last_nuc_time = now
                 if self._focus_requested:
-                    self._execute_focus(self._focus_direction)
+                    self._execute_focus(self._focus_step)
                     self._focus_requested = False
                 self._mutex.unlock()
 
@@ -530,68 +546,114 @@ class CameraWorker(QObject):
             self.nuc_status.emit(False, f"NUC failed: {e}")
             logger.exception("NUC execution failed")
 
-    @staticmethod
-    def _focus_scalar(value) -> float:
+    def _execute_focus(self, step_mm: int):
+        """Execute a focus move by the given signed step (mm).
+
+        Increments come from config.json focus.coarse_step_mm /
+        fine_step_mm; only the sign is decided by the caller. Reads the
+        final position after the move and prints a single two-line log:
+        the button label and the final focus distance. Small differences
+        between requested and actual distance are normal. The only
+        failure case is an exception from reading or writing focus.
         """
-        Convert a HALCON parameter value to float.
-
-        get_framegrabber_param returns an HTuple (list-like) even for a
-        scalar parameter. Extract the first element before converting.
-        """
-        if isinstance(value, (list, tuple)):
-            value = value[0]
-        return float(value)
-
-    def _focus_get(self, name: str) -> float:
-        return self._focus_scalar(
-            ha.get_framegrabber_param(self._framegrabber, name)
-        )
-
-    def _execute_focus(self, direction: int):
-        """Execute focus near/far with before/move/after diagnostics.
-
-        Logs current, target and final focus once per command. If the
-        focus value cannot be read before moving, log that and stop.
-        """
-        label = "Focus Near" if direction == 1 else "Focus Far"
+        coarse = int(self._config.get("focus", "coarse_step_mm"))
+        if step_mm <= -coarse:
+            label = "Focus --"
+        elif step_mm > 0:
+            label = "Focus +"
+        elif step_mm < 0:
+            label = "Focus -"
+        else:
+            label = "Focus ++"
         self.focus_status.emit(True, label)
 
-        try:
-            current = self._focus_get("FLK_TI_ControlFeature_CurrentFocusDistanceMm")
-        except Exception as e:
+        driver = self._focus_driver
+        if driver is None:
             self.log_message.emit("Current focus unavailable")
             self.focus_status.emit(False, f"{label} failed")
-            logger.exception(f"{label} failed to read focus: {e}")
             return
 
         try:
-            step = int(self._config.get("focus", "step_mm")) * direction
-            target = current + step
+            current = driver.get_focus_distance()
+            target = current + step_mm
 
-            min_focus = self._focus_get("FLK_TI_ControlFeature_FocusDistanceMm_Min")
-            max_focus = self._focus_get("FLK_TI_ControlFeature_FocusDistanceMm_Max")
+            min_focus, max_focus = driver.get_focus_limits()
             target = max(min_focus, min(max_focus, target))
 
-            ha.set_framegrabber_param(self._framegrabber, "FLK_TI_ControlFeature_SetFocusDistanceMm", target)
+            driver.set_focus_distance(target)
+            time.sleep(0.2)
 
-            start = time.time()
-            while time.time() - start < 2.0:
-                new_pos = self._focus_get("FLK_TI_ControlFeature_CurrentFocusDistanceMm")
-                if abs(new_pos - target) <= 10:
-                    break
-                time.sleep(0.02)
-
-            final = self._focus_get("FLK_TI_ControlFeature_CurrentFocusDistanceMm")
+            final = driver.get_focus_distance()
 
             self.log_message.emit(label)
-            self.log_message.emit(f"Current : {current:.2f} mm")
-            self.log_message.emit(f"Target : {target:.2f} mm")
-            self.log_message.emit(f"Final : {final:.2f} mm")
+            self.log_message.emit(f"Current Focus : {final:.2f} mm")
             self.focus_status.emit(False, "Focus completed")
 
         except Exception as e:
+            self.log_message.emit(f"{label} failed: {e}")
             self.focus_status.emit(False, f"{label} failed")
             logger.exception(f"{label} execution failed: {e}")
+
+    def _wait_focus_stable(self, driver, timeout: float = 10.0) -> float:
+        """Wait until the focus position stops changing, returning the settlement time.
+
+        Polls the reported focus distance repeatedly. Movement is treated
+        as finished once the reported position is unchanged across a short
+        window, or the timeout expires. A shallow sleep is avoided so the
+        wait tracks real driver-reported stability rather than a fixed
+        duration.
+        """
+        last = None
+        stable_since = time.time()
+        deadline = time.time() + timeout
+        settle_window = 0.5
+
+        while time.time() < deadline:
+            current = driver.get_focus_distance()
+            if last is None or abs(current - last) >= 1.0:
+                stable_since = time.time()
+            last = current
+            if time.time() - stable_since >= settle_window:
+                return last
+            time.sleep(0.1)
+        return last
+
+    def _apply_default_focus(self):
+        """Move the lens to the configured default focus exactly once after connecting.
+
+        The target comes from config.json focus.default_focus_mm; it is
+        never hardcoded here. The lens is moved, the motion is allowed to
+        settle, and the resulting position is read back once and logged.
+        A failure to move the focus only logs an error and lets the camera
+        continue starting normally with its current position. This never
+        runs from the acquisition loop, after NUC, or via the manual focus
+        step buttons.
+        """
+        target = self._config.get("focus", "default_focus_mm")
+        if target is None:
+            return
+
+        driver = self._focus_driver
+        if driver is None:
+            self.log_message.emit("Default focus failed")
+            self.log_message.emit("Continuing with current focus position.")
+            return
+
+        try:
+            self.log_message.emit("Setting default focus...")
+
+            min_focus, max_focus = driver.get_focus_limits()
+            target_clamped = float(min(max(min_focus, float(target)), max_focus))
+
+            driver.set_focus_distance(target_clamped)
+            final = self._wait_focus_stable(driver)
+
+            self.log_message.emit(f"Current Focus : {final:.2f} mm")
+            self.log_message.emit("Default focus completed")
+        except Exception as e:
+            self.log_message.emit("Default focus failed")
+            self.log_message.emit("Continuing with current focus position.")
+            logger.exception("Default focus failed")
 
     def _attempt_reconnect(self):
         """Attempt to reconnect to camera."""
@@ -910,15 +972,36 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        self.btn_focus_near = QPushButton("Focus Near")
-        self.btn_focus_near.clicked.connect(lambda: self._on_focus(1))
-        self.btn_focus_near.setEnabled(False)
-        toolbar.addWidget(self.btn_focus_near)
+        toolbar.addSeparator()
 
-        self.btn_focus_far = QPushButton("Focus Far")
-        self.btn_focus_far.clicked.connect(lambda: self._on_focus(-1))
-        self.btn_focus_far.setEnabled(False)
-        toolbar.addWidget(self.btn_focus_far)
+        toolbar.addWidget(QLabel("Focus"))
+
+        focus_coarse = int(self._config.get("focus", "coarse_step_mm"))
+        focus_fine = int(self._config.get("focus", "fine_step_mm"))
+
+        self.btn_focus_minus2 = QPushButton("--")
+        self.btn_focus_minus2.setToolTip(f"Large focus step (-{focus_coarse} mm)")
+        self.btn_focus_minus2.clicked.connect(lambda: self._on_focus(-focus_coarse))
+        self.btn_focus_minus2.setEnabled(False)
+        toolbar.addWidget(self.btn_focus_minus2)
+
+        self.btn_focus_minus = QPushButton("-")
+        self.btn_focus_minus.setToolTip(f"Fine focus step (-{focus_fine} mm)")
+        self.btn_focus_minus.clicked.connect(lambda: self._on_focus(-focus_fine))
+        self.btn_focus_minus.setEnabled(False)
+        toolbar.addWidget(self.btn_focus_minus)
+
+        self.btn_focus_plus = QPushButton("+")
+        self.btn_focus_plus.setToolTip(f"Fine focus step (+{focus_fine} mm)")
+        self.btn_focus_plus.clicked.connect(lambda: self._on_focus(focus_fine))
+        self.btn_focus_plus.setEnabled(False)
+        toolbar.addWidget(self.btn_focus_plus)
+
+        self.btn_focus_plus2 = QPushButton("++")
+        self.btn_focus_plus2.setToolTip(f"Large focus step (+{focus_coarse} mm)")
+        self.btn_focus_plus2.clicked.connect(lambda: self._on_focus(focus_coarse))
+        self.btn_focus_plus2.setEnabled(False)
+        toolbar.addWidget(self.btn_focus_plus2)
 
         toolbar.addSeparator()
 
@@ -1076,12 +1159,18 @@ class MainWindow(QMainWindow):
             self.display_widget.set_roi_data(self._worker._roi_names, self._worker._roi_coords)
             self._resize_roi_table()
 
-    def _on_focus(self, direction: int):
-        """Handle focus buttons."""
+    def _on_focus(self, step_mm: int):
+        """Handle focus step buttons."""
         if self._worker:
-            self._worker.request_focus(direction)
-            self.btn_focus_near.setEnabled(False)
-            self.btn_focus_far.setEnabled(False)
+            self._worker.request_focus(step_mm)
+            self._set_focus_buttons_enabled(False)
+
+    def _set_focus_buttons_enabled(self, enabled: bool):
+        """Enable or disable all four focus step buttons."""
+        self.btn_focus_minus2.setEnabled(enabled)
+        self.btn_focus_minus.setEnabled(enabled)
+        self.btn_focus_plus.setEnabled(enabled)
+        self.btn_focus_plus2.setEnabled(enabled)
 
     def _on_nuc(self):
         """Handle NUC button."""
@@ -1148,8 +1237,10 @@ class MainWindow(QMainWindow):
         self.btn_connect.setEnabled(not connected)
         self.btn_disconnect.setEnabled(connected)
         self.btn_reload_roi.setEnabled(connected)
-        self.btn_focus_near.setEnabled(connected)
-        self.btn_focus_far.setEnabled(connected)
+        self.btn_focus_minus2.setEnabled(connected)
+        self.btn_focus_minus.setEnabled(connected)
+        self.btn_focus_plus.setEnabled(connected)
+        self.btn_focus_plus2.setEnabled(connected)
         self.btn_nuc.setEnabled(connected)
         self.btn_benchmark.setEnabled(connected)
         if connected and self._worker:
@@ -1169,8 +1260,7 @@ class MainWindow(QMainWindow):
         self._log(msg)
 
     def _on_focus_status(self, busy: bool, msg: str):
-        self.btn_focus_near.setEnabled(not busy)
-        self.btn_focus_far.setEnabled(not busy)
+        self._set_focus_buttons_enabled(not busy)
         self._log(msg)
 
     def _update_roi_table(self, statistics: List[ROIStatistics]):

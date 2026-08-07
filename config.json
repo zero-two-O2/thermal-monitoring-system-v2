@@ -16,7 +16,9 @@
   },
 
   "focus": {
-    "step_mm": 1000
+    "default_focus_mm": 1000,
+    "coarse_step_mm": 1000,
+    "fine_step_mm": 100
   },
 
   "display": {

@@ -17,14 +17,15 @@ No threading or image processing is performed here.
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import halcon as ha
 import numpy as np
 
-from camera.models.camera_model import CameraModel
-
 from utilities import logger
+
+if TYPE_CHECKING:
+    from camera.models.camera_model import CameraModel
 
 
 class HalconDriver:
@@ -37,16 +38,31 @@ class HalconDriver:
 
     FOCUS_STEP_MM = 250
 
+    #
+    # Fluke TI focus parameters. CurrentFocusDistanceMm is read-only
+    # (reports the actual motor position). Focus movement is commanded
+    # by writing SetFocusDistanceMm with the requested target distance.
+    #
+
+    FOCUS_READ_PARAM = "FLK_TI_ControlFeature_CurrentFocusDistanceMm"
+    FOCUS_WRITE_PARAM = "FLK_TI_ControlFeature_SetFocusDistanceMm"
+
     def __init__(
         self,
         camera: CameraModel,
+        framegrabber: Any | None = None,
     ) -> None:
 
         self.camera = camera
 
-        self._framegrabber = None
+        #
+        # Optionally wrap an already-open framegrabber (used by the
+        # validation tool). When None, connect() opens a fresh handle.
+        #
 
-        self._connected = False
+        self._framegrabber = framegrabber
+
+        self._connected = framegrabber is not None
 
     # ==========================================================
     # Connection
@@ -366,7 +382,7 @@ class HalconDriver:
 
         return float(
             self.get_parameter(
-                "FLK_TI_ControlFeature_CurrentFocusDistanceMm"
+                self.FOCUS_READ_PARAM
             )
         )
 
@@ -374,9 +390,15 @@ class HalconDriver:
         self,
         distance_mm: float,
     ) -> None:
+        """
+        Command the focus motor to move to distance_mm.
+
+        Writes the target distance using the SetFocusDistanceMm feature
+        supported by the current device.
+        """
 
         self.set_parameter(
-            "FLK_TI_ControlFeature_SetFocusDistanceMm",
+            self.FOCUS_WRITE_PARAM,
             distance_mm,
         )
 
