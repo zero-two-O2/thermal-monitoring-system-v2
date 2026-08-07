@@ -31,8 +31,7 @@ from dataclasses import dataclass
 
 import halcon as ha
 import numpy as np
-from PyQt6.QtCore import (QThread, pyqtSignal, QObject, QTimer, Qt,
-                          QMutex, QWaitCondition)
+from PyQt6.QtCore import (QThread, pyqtSignal, QObject, QTimer, QMutex)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QLabel, QPushButton, QTableWidget,
                               QTableWidgetItem, QTextEdit, QStatusBar,
@@ -83,13 +82,13 @@ class CameraWorker(QObject):
     nuc_status = pyqtSignal(bool, str)
     focus_status = pyqtSignal(bool, str)
     initialized = pyqtSignal()
+    finished = pyqtSignal()
 
     def __init__(self, camera_info: CameraInfo):
         super().__init__()
         self._camera_info = camera_info
         self._running = False
         self._mutex = QMutex()
-        self._wait_condition = QWaitCondition()
         self._framegrabber = None
         self._connected = False
         self._calibration = None
@@ -103,52 +102,32 @@ class CameraWorker(QObject):
     def initialize(self) -> bool:
         """Stage 1: Open framegrabber, connect camera, grab first image, load calibration, load ROIs, generate regions."""
         try:
-            self.log_message.emit(f"Opening framegrabber for device: {self._camera_info.device}")
-
             self._framegrabber = ha.open_framegrabber(
                 "GigEVision2", 0, 0, 0, 0, 0, 0,
                 "progressive", -1, "default", -1, "false",
                 "default", self._camera_info.device, 0, -1
             )
 
-            self.log_message.emit("Framegrabber opened successfully")
-            self.log_message.emit("Configuring camera parameters...")
             self._configure_camera()
 
             ha.grab_image_start(self._framegrabber, -1)
-            self.log_message.emit("grab_image_start() called - continuous acquisition started")
 
-            self.log_message.emit("Grabbing first image...")
             first_frame = ha.grab_image_async(self._framegrabber, 5000)
             if first_frame is None:
                 raise RuntimeError("Failed to grab first frame within 5s")
 
-            # Log first frame details
-            width = ha.get_image_size(first_frame)[1]
-            height = ha.get_image_size(first_frame)[0]
-            first_numpy = ha.himage_as_numpy_array(first_frame)
-            gray_min = int(first_numpy.min())
-            gray_max = int(first_numpy.max())
-            self.log_message.emit(
-                f"First frame verified: {width}x{height}, "
-                f"gray range [{gray_min}, {gray_max}], "
-                f"dtype={first_numpy.dtype}"
-            )
-
-            self.log_message.emit("Loading calibration...")
             self._calibration = CalibrationManager()
             self._calibration.initialize()
+            self.log_message.emit("Calibration loaded")
 
-            self.log_message.emit("Loading ROI JSON...")
             if not self._load_rois():
                 raise RuntimeError("Failed to load ROIs")
 
-            self.log_message.emit("Generating HALCON regions...")
             self._generate_halcon_regions()
 
             self._connected = True
             self.connected_signal.emit(True)
-            self.log_message.emit("Camera connected and initialized successfully")
+            self.log_message.emit("Camera connected")
             self.initialized.emit()
             return True
 
@@ -200,7 +179,7 @@ class CameraWorker(QObject):
                 self._roi_names.append(roi["name"])
                 self._roi_coords.append((roi["y1"], roi["x1"], roi["y2"], roi["x2"]))
 
-            self.log_message.emit(f"Loaded JSON ROIs: {len(self._roi_names)}")
+            self.log_message.emit(f"Loaded {len(self._roi_names)} ROIs")
             return True
 
         except FileNotFoundError:
@@ -222,11 +201,9 @@ class CameraWorker(QObject):
         cols2 = [c[3] for c in self._roi_coords]
 
         self._roi_regions = ha.gen_rectangle1(rows1, cols1, rows2, cols2)
-        self.log_message.emit(f"Generated HALCON Regions: {len(self._roi_names)}")
 
     def reload_rois(self):
         """Reload ROI JSON and regenerate HALCON regions."""
-        self.log_message.emit("Reloading ROI JSON...")
         if self._load_rois():
             self._generate_halcon_regions()
             self.log_message.emit("ROIs reloaded successfully")
@@ -247,21 +224,25 @@ class CameraWorker(QObject):
         self._mutex.unlock()
 
     def run(self):
-        """Main processing loop - runs in worker thread."""
-        self.log_message.emit("Acquisition loop started")
+        """Main processing loop - runs in worker thread.
+
+        Owns the acquisition loop and exits naturally when _running is
+        set to False by stop(). Cleanup runs here (in the worker thread)
+        after the loop returns so the framegrabber is never closed while
+        a grab_image_async may still be executing.
+        """
+        if self._running:
+            return
         self._running = True
-        frame_count = 0
-        last_fps_time = time.time()
-        fps = 0.0
-        prev_frame_hash = None
 
         while self._running:
-            loop_start = time.perf_counter()
 
             try:
                 if not self._connected:
+                    if not self._running:
+                        break
                     self._attempt_reconnect()
-                    time.sleep(2.0)
+                    time.sleep(0.5)
                     continue
 
                 raw_frame = ha.grab_image_async(self._framegrabber, 500)
@@ -270,35 +251,7 @@ class CameraWorker(QObject):
 
                 raw_numpy = ha.himage_as_numpy_array(raw_frame)
 
-                # Verify frame on first acquisition
-                if frame_count == 0:
-                    width = raw_numpy.shape[1]
-                    height = raw_numpy.shape[0]
-                    gray_min = int(raw_numpy.min())
-                    gray_max = int(raw_numpy.max())
-                    self.log_message.emit(
-                        f"First frame verified: {width}x{height}, "
-                        f"gray range [{gray_min}, {gray_max}], "
-                        f"dtype={raw_numpy.dtype}"
-                    )
-
                 temp_frame = self._calibration.raw_to_temperature(raw_numpy)
-
-                # Verify calibration output on first frame
-                if frame_count == 0:
-                    self.log_message.emit(
-                        f"Calibration output: shape={temp_frame.shape}, "
-                        f"dtype={temp_frame.dtype}, "
-                        f"min={np.nanmin(temp_frame):.2f}, "
-                        f"max={np.nanmax(temp_frame):.2f}"
-                    )
-
-                # Verify consecutive frames are different (after first few frames)
-                if frame_count > 5:
-                    frame_hash = hash(temp_frame.tobytes())
-                    if frame_hash == prev_frame_hash:
-                        self.log_message.emit("WARNING: Consecutive frames identical - acquisition may be stalled")
-                    prev_frame_hash = frame_hash
 
                 proc_start = time.perf_counter()
 
@@ -321,15 +274,6 @@ class CameraWorker(QObject):
                         range_val=float(range_vals[i])
                     ))
 
-                frame_count += 1
-                current_time = time.time()
-                if current_time - last_fps_time >= 1.0:
-                    fps = frame_count / (current_time - last_fps_time)
-                    frame_count = 0
-                    last_fps_time = current_time
-
-                total_time_ms = (time.perf_counter() - loop_start) * 1000.0
-
                 # Pass numpy array instead of HALCON image (thread-safe)
                 self.frame_ready.emit(temp_frame, statistics, proc_time_ms)
 
@@ -348,10 +292,29 @@ class CameraWorker(QObject):
                     logger.exception("Frame processing error")
                     self._handle_disconnect()
 
+        self._cleanup()
+        self.finished.emit()
+
+    def _cleanup(self):
+        """Close the framegrabber and notify listeners.
+
+        Runs in the worker thread after run() has returned so no
+        grab_image_async is left in flight.
+        """
+        self._running = False
+        try:
+            if self._framegrabber:
+                ha.close_framegrabber(self._framegrabber)
+        except Exception:
+            logger.exception("Error closing framegrabber")
+        finally:
+            self._framegrabber = None
+        self._connected = False
+        self.connected_signal.emit(False)
+
     def _execute_nuc(self):
         """Execute manual NUC synchronously."""
         self.nuc_status.emit(True, "NUC started")
-        self.log_message.emit("Executing manual NUC...")
 
         try:
             ha.set_framegrabber_param(
@@ -373,57 +336,65 @@ class CameraWorker(QObject):
                     pass
 
             self.nuc_status.emit(False, "NUC completed")
-            self.log_message.emit("Manual NUC completed successfully")
 
         except Exception as e:
             self.nuc_status.emit(False, f"NUC failed: {e}")
-            self.log_message.emit(f"NUC failed: {e}")
             logger.exception("NUC execution failed")
+
+    @staticmethod
+    def _focus_scalar(value) -> float:
+        """
+        Convert a HALCON parameter value to float.
+
+        get_framegrabber_param returns an HTuple (list-like) even for a
+        scalar parameter. Extract the first element before converting.
+        """
+        if isinstance(value, (list, tuple)):
+            value = value[0]
+        return float(value)
+
+    def _focus_get(self, name: str) -> float:
+        return self._focus_scalar(
+            ha.get_framegrabber_param(self._framegrabber, name)
+        )
 
     def _execute_focus(self, direction: int):
         """Execute focus near/far."""
         self.focus_status.emit(True, "Focus started")
-        self.log_message.emit(f"Focus {'near' if direction > 0 else 'far'} started...")
 
         try:
-            current = float(ha.get_framegrabber_param(self._framegrabber, "FLK_TI_ControlFeature_CurrentFocusDistanceMm"))
+            current = self._focus_get("FLK_TI_ControlFeature_CurrentFocusDistanceMm")
             step = 250 * direction
             target = current + step
 
-            min_focus = float(ha.get_framegrabber_param(self._framegrabber, "FLK_TI_ControlFeature_FocusDistanceMm_Min"))
-            max_focus = float(ha.get_framegrabber_param(self._framegrabber, "FLK_TI_ControlFeature_FocusDistanceMm_Max"))
+            min_focus = self._focus_get("FLK_TI_ControlFeature_FocusDistanceMm_Min")
+            max_focus = self._focus_get("FLK_TI_ControlFeature_FocusDistanceMm_Max")
             target = max(min_focus, min(max_focus, target))
 
             ha.set_framegrabber_param(self._framegrabber, "FLK_TI_ControlFeature_SetFocusDistanceMm", target)
 
             start = time.time()
             while time.time() - start < 2.0:
-                new_pos = float(ha.get_framegrabber_param(self._framegrabber, "FLK_TI_ControlFeature_CurrentFocusDistanceMm"))
+                new_pos = self._focus_get("FLK_TI_ControlFeature_CurrentFocusDistanceMm")
                 if abs(new_pos - target) <= 10:
                     break
                 time.sleep(0.02)
 
             self.focus_status.emit(False, "Focus completed")
-            self.log_message.emit("Focus completed successfully")
 
         except Exception as e:
             self.focus_status.emit(False, f"Focus failed: {e}")
-            self.log_message.emit(f"Focus failed: {e}")
             logger.exception("Focus execution failed")
 
     def _attempt_reconnect(self):
         """Attempt to reconnect to camera."""
-        self.log_message.emit("Attempting camera reconnect...")
         try:
             if self._framegrabber:
                 ha.close_framegrabber(self._framegrabber)
         except Exception:
             pass
 
-        if self.initialize():
-            self.log_message.emit("Reconnection successful")
-        else:
-            self.log_message.emit("Reconnection failed, will retry")
+        self.initialize()
 
     def _handle_disconnect(self):
         """Handle camera disconnect."""
@@ -432,32 +403,12 @@ class CameraWorker(QObject):
         self.log_message.emit("Camera disconnected")
 
     def stop(self):
-        """Stop the worker thread."""
+        """Stop the worker thread.
+
+        Only flips the running flag. run() exits its loop naturally and
+        performs the actual cleanup (close framegrabber, emit finished).
+        """
         self._running = False
-        self._wait_condition.wakeAll()
-
-        try:
-            if self._framegrabber:
-                ha.close_framegrabber(self._framegrabber)
-        except Exception:
-            pass
-
-        self._connected = False
-        self.connected_signal.emit(False)
-
-
-class CameraWorkerWrapper(QObject):
-    """Wrapper to run CameraWorker.run() in the thread's event loop without blocking signals."""
-    finished = pyqtSignal()
-
-    def __init__(self, worker: CameraWorker):
-        super().__init__()
-        self._worker = worker
-
-    def start_loop(self):
-        """Start the acquisition loop."""
-        self._worker.run()
-        self.finished.emit()
 
 
 class HALCONDisplayWidget(QWidget):
@@ -483,7 +434,6 @@ class HALCONDisplayWidget(QWidget):
                 )
                 ha.set_part(self._window_handle, 0, 0, self._image_height - 1, self._image_width - 1)
                 ha.set_window_param(self._window_handle, "flush", "true")
-                logger.info(f"HALCON window created: handle={self._window_handle}")
             except Exception as e:
                 logger.exception("Failed to create HALCON window")
 
@@ -565,7 +515,6 @@ class HALCONDisplayWidget(QWidget):
         """Store ROI data for display."""
         self._roi_names = names
         self._roi_coords = coords
-        logger.info(f"ROI Table Rows: {len(names)}")
 
     def closeEvent(self, event):
         if self._window_handle:
@@ -586,7 +535,6 @@ class MainWindow(QMainWindow):
 
         self._worker = None
         self._worker_thread = None
-        self._worker_wrapper = None
         self._current_temp_frame = None
         self._camera_info = None
 
@@ -695,7 +643,6 @@ class MainWindow(QMainWindow):
 
     def _discover_and_connect(self):
         """Discover cameras and connect to first TV46L."""
-        self._log("Discovering cameras...")
         discovery = CameraDiscovery()
         cameras = discovery.discover()
 
@@ -704,7 +651,7 @@ class MainWindow(QMainWindow):
             return
 
         self._camera_info = cameras[0]
-        self._log(f"Discovered camera: {self._camera_info.serial} ({self._camera_info.ip})")
+        self._log(f"Camera discovered: {self._camera_info.serial} ({self._camera_info.ip})")
 
         # Connect automatically
         self._start_worker()
@@ -726,11 +673,12 @@ class MainWindow(QMainWindow):
         self._worker.nuc_status.connect(self._on_nuc_status)
         self._worker.focus_status.connect(self._on_focus_status)
 
-        # Use wrapper to run the acquisition loop without blocking the thread's event loop
-        self._worker_wrapper = CameraWorkerWrapper(self._worker)
-        self._worker_wrapper.moveToThread(self._worker_thread)
-        self._worker.initialized.connect(self._worker_wrapper.start_loop)
-        self._worker_wrapper.finished.connect(self._worker_thread.quit)
+        # Worker owns the acquisition loop. When run() returns it emits
+        # finished; the thread then quits and cleans up its own objects.
+        self._worker.initialized.connect(self._worker.run)
+        self._worker.finished.connect(self._worker_thread.quit)
+        self._worker_thread.finished.connect(self._worker.deleteLater)
+        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
 
         self._worker_thread.started.connect(self._worker.initialize)
         self._worker_thread.start()
@@ -738,14 +686,14 @@ class MainWindow(QMainWindow):
     def _on_connect(self):
         """Handle connect button - retry discovery and connection."""
         if self._worker and not self._worker._connected:
-            self._log("Manual reconnect requested...")
             self._discover_and_connect()
 
     def _on_disconnect(self):
         """Handle disconnect button."""
         if self._worker:
             self._worker.stop()
-            self._log("Disconnected from camera")
+            self._shutdown_thread()
+            self._log("Camera disconnected")
 
     def _on_reload_roi(self):
         """Handle reload ROI button."""
@@ -865,12 +813,24 @@ class MainWindow(QMainWindow):
                 temp = self._current_temp_frame[y, x]
                 self.lbl_mouse_temp.setText(f"Mouse X: {x}  Y: {y}  Temperature: {temp:.2f}°C")
 
+    def _shutdown_thread(self):
+        """Ask the worker to stop and wait for the thread to exit.
+
+        stop() flips the running flag; run() returns, runs cleanup and
+        emits finished which quits the thread. The wait() call guarantees
+        the QThread object is fully stopped before the window closes.
+        """
+        if not self._worker_thread:
+            return
+        self._worker_thread.quit()
+        self._worker_thread.wait(3000)
+        self._worker = None
+        self._worker_thread = None
+
     def closeEvent(self, event: QCloseEvent):
         if self._worker:
             self._worker.stop()
-        if self._worker_thread:
-            self._worker_thread.quit()
-            self._worker_thread.wait(3000)
+        self._shutdown_thread()
         event.accept()
 
 

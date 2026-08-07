@@ -245,15 +245,33 @@ class HalconDriver:
     ) -> Any:
         """
         Read a camera parameter.
+
+        HALCON returns values as HTuple (list-like) even for
+        single scalar parameters. Unwrap so callers can safely
+        convert with float().
         """
 
-        return ha.get_framegrabber_param(
+        value = ha.get_framegrabber_param(
 
             self._framegrabber,
 
             name,
 
         )
+
+        return self._as_scalar(value)
+
+    @staticmethod
+    def _as_scalar(value: Any) -> Any:
+        """
+        Return first element when HALCON returns an HTuple/list,
+        otherwise the value unchanged.
+        """
+
+        if isinstance(value, (list, tuple)):
+            return value[0]
+
+        return value
 
     # ==========================================================
     # Status

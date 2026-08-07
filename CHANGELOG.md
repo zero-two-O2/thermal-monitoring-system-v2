@@ -1,3 +1,35 @@
+## 2026-08-07 10:00
+### What changed
+- Fixed app-crash-on-exit (`QThread: Destroyed while thread is still running`) in `halcon_roi_validation.py`.
+- Removed `CameraWorkerWrapper` entirely; was an unnecessary second QObject that blocked initiation of the loop. The worker now owns the acquisition loop directly (`initialized -> worker.run`).
+- `run()` is guarded against re-entry (`if self._running: return`), checks `_running` each iteration and on shutdown, and after the loop runs `_cleanup()` (close framegrabber -> `_connected=False` -> emit `connected(False)`) then emits `finished`.
+- `stop()` now only flips `_running=False`; it no longer closes the framegrabber / quits / waits / deletes. Those steps happen after `run()` returns, in the worker thread, so the framegrabber is never closed while a `grab_image_async` is in flight.
+- Wiring: `worker.finished -> thread.quit`, `thread.finished -> worker.deleteLater + thread.deleteLater`. Shutdown uses new `_shutdown_thread()` helper (`quit()` + `wait(3000)`) from both `_on_disconnect` and `closeEvent`, and nulls the references afterwards.
+- Removed unused `QWaitCondition` import and the dead `_worker_wrapper` attribute.
+### Why
+- Worker thread event loop was never actually running, so `thread.quit()` could not join it; the QThread was destroyed while `run()`'s infinite loop died still running. Removed the wrapper so the worker owns the loop and exits naturally on shutdown.
+### Notes
+- Focus/NUC unaffected (they are driven by direct attribute calls setting flags the loop reads under the mutex, not queued signals). Requires a real camera to verify clean USB/GigE disconnect and no hanging Python process.
+- 5 pre-existing ruff warnings remain (unused `Optional/QHBoxLayout/QMessageBox`, two `except Exception as e`); unrelated to this change.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
+## 2026-08-07 09:00
+### What changed
+- Fixed Focus Near / Focus Far controls in `halcon_roi_validation.py`. `_execute_focus` used `float(ha.get_framegrabber_param(...))`, but HALCON returns an HTuple (list), raising `TypeError: float() argument must be... not 'list'`. Added `_focus_scalar()` unwrap + `_focus_get()` helper so reads return a real float before math. Reuses the same focus sequence as the existing camera/driver service (read current, compute target clamped to min/max, set distance, wait until within tolerance). No new focus algorithm.
+- Hardened canonical focus source in `camera/services/halcon_driver.py`: `get_parameter()` now unwraps single-element HTuple/list via `_as_scalar()`, so `get_focus_distance()`/`get_focus_limits()` no longer feed a list into `float()`.
+- Focus still runs in the worker thread: GUI disables both Focus buttons on press and re-enables via `focus_status` signal after movement completes; UI stays responsive.
+- Removed noisy/debug logging per AGENTS rule: first-frame/calibration-output verification, "grabbing first frame", "HALCON window created", "ROI Table Rows", calibration/config step chatter, per-frame stall warning, reconnect chatter, FPS/time counters. Kept only: Camera discovered, Camera connected, Calibration loaded, Loaded N ROIs, Focus started, Focus completed, NUC started/completed, Camera disconnected, and critical errors.
+### Why
+- Focus buttons failed with TypeError; focus implementation was duplicated in the prototype instead of sharing the robust scalar handling. Logging flooded stdout/event log per-frame during debugging.
+### Notes
+- Prototype worker keeps its own framegrabber (existing design); the focus math matches `tv46l_camera.py`/`halcon_driver.py`. Hardware-only: focus movement requires a live test with the TV46L. Verified py_compile OK; ruff clean for changed code (6 pre-existing unused-import/except warnings remain).
+### Files Changed
+- camera/services/halcon_driver.py
+- halcon_roi_validation.py
+- CHANGELOG.md
+
 ## 2026-08-06 14:35
 ### What changed
 - Applied MVTec batched-workflow optimization pass to the standalone ROI prototype (`halcon_roi_validation.py`). No production code touched.
