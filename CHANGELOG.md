@@ -1,3 +1,15 @@
+## 2026-08-07 19:30
+
+### What changed
+- Added camera selection to the four-camera viewer. The user picks one camera by clicking anywhere inside its image; the selected panel gets a 3 px cyan border and its title shows the `| SELECTED` suffix (e.g. `Camera 2 | Connected | SELECTED`), while unselected panels keep `Camera 1 | Connected`. Only one camera may be selected; the default is Camera 1. Acquisition is untouched: every camera keeps its own framegrabber/worker/thread, ROI processing, alarm engine and auto-NUC timer regardless of selection.
+### Why
+- The app needs its final operating model where the operator focuses all tooling and readouts on one camera while the other three keep monitoring in the background.
+### Notes
+- Selection is a pure GUI/state refactor in `MainWindow`. One index (`self._selected_index`) is the single source of truth; every toolbar control, table, status readout and mouse view reads `self.cameras[_selected_index]`. A new `_select_camera()` applies the border via `CameraPanel.set_selected()` and calls `_refresh_selected_state()` so the ROI table, alarm table, mouse readout, status bar and NUC/focus/zoom state repopulate instantly from the just-selected camera. `CameraRuntime` now caches `latest_alarms` so switching selection never waits for a fresh alarm emit. Mouse temperature and stale alarm coloring now apply only to the selected camera; toolbar controls (focus, Manual NUC, Reload ROI) target the selected worker only, and focus/NUC/reload buttons enable only when the selected camera is connected. Alarm/ROI state is per-camera and never merged. Verify with live hardware that clicking any camera switches the border/title and that background cameras keep streaming, processing ROIs and raising alarms while another is selected.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
 ## 2026-08-07 17:50
 
 ### What changed

@@ -107,6 +107,7 @@ class CameraRuntime:
         self.current_focus = 0.0
         self.fps = 0.0
         self.processing_time_ms = 0.0
+        self.latest_alarms: List[Alarm] = []
 
 
 CAMERA_COUNT = 4
@@ -989,6 +990,7 @@ class HALCONDisplayWidget(QWidget):
 
     mouse_moved = pyqtSignal(int, int)
     zoom_changed = pyqtSignal()
+    camera_clicked = pyqtSignal()
 
     ZOOM_LEVELS = [
         (0.50, "50%"),
@@ -1215,6 +1217,11 @@ class HALCONDisplayWidget(QWidget):
         y = max(0, min(self._image_height - 1, y))
         self.mouse_moved.emit(x, y)
 
+    def mousePressEvent(self, event):
+        """Click anywhere in the viewer selects this camera."""
+        super().mousePressEvent(event)
+        self.camera_clicked.emit()
+
     def display_frame(self, temp_numpy, statistics: List[ROIStatistics], proc_time_ms: float):
         """Display frame with ROI overlays using HALCON operators only."""
         self._last_frame = temp_numpy
@@ -1313,13 +1320,14 @@ class CameraPanel(QWidget):
         self.index = index
         self.config = config
         self._connected = False
+        self._selected = False
         # Expanding lets the grid split all available space between the four
         # cells; the display inside fills the rest. No fixed size anywhere
         # in the panel chain, so resizing the window scales every camera.
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setContentsMargins(3, 3, 3, 3)
         layout.setSpacing(2)
 
         self.title_label = QLabel("No Camera")
@@ -1331,14 +1339,35 @@ class CameraPanel(QWidget):
         self.display = HALCONDisplayWidget(config)
         layout.addWidget(self.display, stretch=1)
 
+        self._apply_highlight()
+
     def _title_text(self) -> str:
-        if self._connected:
-            return f"Camera {self.index + 1} | Connected"
-        return f"Camera {self.index + 1} | Disconnected"
+        state = "Connected" if self._connected else "Disconnected"
+        base = f"Camera {self.index + 1} | {state}"
+        if self._selected:
+            return f"{base} | SELECTED"
+        return base
 
     def set_connected(self, connected: bool) -> None:
         self._connected = connected
         self.title_label.setText(self._title_text())
+
+    def set_selected(self, selected: bool) -> None:
+        if selected == self._selected:
+            return
+        self._selected = selected
+        self.title_label.setText(self._title_text())
+        self._apply_highlight()
+
+    def is_selected(self) -> bool:
+        return self._selected
+
+    def _apply_highlight(self) -> None:
+        """Draw a cyan box around the selected camera's panel."""
+        if self._selected:
+            self.setStyleSheet("CameraPanel { border: 3px solid #00E5FF; }")
+        else:
+            self.setStyleSheet("")
 
 
 class MainWindow(QMainWindow):
@@ -1353,6 +1382,7 @@ class MainWindow(QMainWindow):
         self._cameras: List[CameraRuntime] = [
             CameraRuntime(i) for i in range(CAMERA_COUNT)
         ]
+        self._panels: List[CameraPanel] = []
         self._selected_index = 0
 
         self._active_alarm_count = 0
@@ -1377,6 +1407,11 @@ class MainWindow(QMainWindow):
         self._create_lower_section(main_layout)
         self._create_event_log(main_layout)
         self._create_status_bar()
+
+        # Default selection is Camera 1. All widgets above exist by now, so
+        # the first highlight and selected-state refresh are safe to run.
+        self._apply_selection_highlight()
+        self._refresh_selected_state()
 
     def _create_toolbar(self, parent_layout):
         """Create toolbar with Connect, Disconnect, Reload ROI, Focus, NUC, Benchmark."""
@@ -1464,14 +1499,70 @@ class MainWindow(QMainWindow):
 
         for i, runtime in enumerate(self._cameras):
             panel = CameraPanel(i, self._config)
+            self._panels.append(panel)
             runtime.title_label = panel.title_label
             runtime.display = panel.display
             panel.display.mouse_moved.connect(
                 lambda x, y, idx=i: self._on_mouse_move(idx, x, y)
             )
+            panel.display.camera_clicked.connect(
+                lambda idx=i: self._select_camera(idx)
+            )
             grid.addWidget(panel, i // 2, i % 2)
 
         parent_layout.addLayout(grid, stretch=5)
+
+    def _select_camera(self, index: int) -> None:
+        """Make `index` the active camera.
+
+        Only one camera may be selected at a time. Selecting never touches
+        the other workers: they keep acquiring, processing ROIs, and
+        evaluating alarms independently. This only changes which camera the
+        shared tables, mouse readout, status bar, and toolbar controls read.
+        """
+        if index < 0 or index >= CAMERA_COUNT:
+            return
+        if index == self._selected_index:
+            return
+        self._selected_index = index
+        self._apply_selection_highlight()
+        self._refresh_selected_state()
+        self._log(f"Selected Camera {index + 1}")
+
+    def _apply_selection_highlight(self) -> None:
+        """Sync the cyan selection border across all four panels."""
+        for i, panel in enumerate(self._panels):
+            panel.set_selected(i == self._selected_index)
+
+    def _refresh_selected_state(self) -> None:
+        """Instantly bind the shared widgets to the selected camera.
+
+        Called when the selection changes so the ROI table, alarm table,
+        mouse readout, status bar, and focus/NUC buttons reflect the new
+        camera immediately instead of waiting for its next frame. Reading
+        a camera that has not finished connecting shows empty placeholders.
+        """
+        runtime = self._cameras[self._selected_index]
+
+        # ROI table is rebuilt from the selected camera's worker.
+        self._resize_roi_table()
+        self._update_roi_table(runtime.latest_statistics)
+
+        # Alarm table mirrors only the selected camera's alarms.
+        self._clear_alarm_table()
+        self._sync_alarm_table(runtime.latest_alarms)
+        self._active_alarm_count = len(runtime.latest_alarms)
+        runtime.display.set_active_alarms({a.roi_name for a in runtime.latest_alarms})
+
+        # Mouse readout shows the selected camera only.
+        self.lbl_mouse_temp.setText(
+            f"Camera {self._selected_index + 1} | Mouse X: --  Y: --  Temperature: --°C"
+        )
+
+        # Status bar and toolbar state follow the selected camera.
+        self._nuc_remaining = -1
+        self._update_status_bar(runtime.processing_time_ms)
+        self._set_selected_controls_enabled()
 
     def _create_mouse_temp(self, parent_layout):
         """Create mouse temperature readout."""
@@ -1544,7 +1635,7 @@ class MainWindow(QMainWindow):
                 )
                 self._start_worker(runtime)
             else:
-                    runtime.title_label.setText(f"Camera {i + 1} | No Camera")
+                    self._panels[i].title_label.setText(f"Camera {i + 1} | No Camera")
 
     def _start_worker(self, runtime: CameraRuntime):
         """Create and start the worker thread for one camera."""
@@ -1603,13 +1694,10 @@ class MainWindow(QMainWindow):
         """Stop every camera independently and release its resources."""
         for i, runtime in enumerate(self._cameras):
             self._shutdown_thread(runtime)
-            runtime.title_label.setText(f"Camera {i + 1} | Disconnected")
+            self._panels[i].set_connected(False)
         self.btn_connect.setEnabled(True)
         self.btn_disconnect.setEnabled(False)
-        self.btn_reload_roi.setEnabled(False)
-        self._set_focus_buttons_enabled(False)
-        self.btn_nuc.setEnabled(False)
-        self.btn_benchmark.setEnabled(False)
+        self._set_selected_controls_enabled()
         self._clear_alarm_table()
         self._log("All cameras disconnected")
 
@@ -1618,11 +1706,14 @@ class MainWindow(QMainWindow):
         self._disconnect_all()
 
     def _on_reload_roi(self):
-        """Handle reload ROI button - reload ROIs for every connected camera."""
-        for runtime in self._cameras:
-            if runtime.worker is not None:
-                runtime.worker.reload_rois()
-        self._resize_roi_table()
+        """Handle reload ROI button - reload ROIs for the selected camera only."""
+        runtime = self._cameras[self._selected_index]
+        if runtime.worker is not None:
+            runtime.worker.reload_rois()
+            runtime.display.set_roi_data(runtime.worker._roi_names, runtime.worker._roi_coords)
+            self._resize_roi_table()
+        else:
+            self._log(f"Camera {self._selected_index + 1}: not connected, cannot reload ROIs")
 
     def _on_focus(self, step_mm: int):
         """Handle focus step buttons for the selected camera."""
@@ -1692,24 +1783,29 @@ class MainWindow(QMainWindow):
     def _on_connected(self, index: int, connected: bool):
         runtime = self._cameras[index]
         runtime.connected = connected
-        runtime.title_label.setText(
-            f"Camera {index + 1} | {'Connected' if connected else 'Disconnected'}"
-        )
+        self._panels[index].set_connected(connected)
         any_connected = any(r.connected for r in self._cameras)
         self.btn_connect.setEnabled(not any_connected)
         self.btn_disconnect.setEnabled(any_connected)
-        self.btn_reload_roi.setEnabled(any_connected)
-        self.btn_focus_minus2.setEnabled(any_connected)
-        self.btn_focus_minus.setEnabled(any_connected)
-        self.btn_focus_plus.setEnabled(any_connected)
-        self.btn_focus_plus2.setEnabled(any_connected)
-        self.btn_nuc.setEnabled(any_connected)
-        self.btn_benchmark.setEnabled(any_connected)
         if connected and runtime.worker is not None:
             runtime.display.set_roi_data(runtime.worker._roi_names, runtime.worker._roi_coords)
-            if index == self._selected_index:
-                self._clear_alarm_table()
-                self._resize_roi_table()
+        if index == self._selected_index:
+            self._set_selected_controls_enabled()
+            self._refresh_selected_state()
+
+    def _set_selected_controls_enabled(self) -> None:
+        """Enable per-camera toolbar controls only when the selected camera is connected.
+
+        Connect/Disconnect are global; every other toolbar action (focus,
+        NUC, reload ROI, benchmark) targets only the selected camera, so its
+        enabled state follows the selected camera's connection.
+        """
+        runtime = self._cameras[self._selected_index]
+        ready = runtime.connected and runtime.worker is not None
+        self.btn_reload_roi.setEnabled(ready)
+        self.btn_benchmark.setEnabled(ready)
+        self.btn_nuc.setEnabled(ready)
+        self._set_focus_buttons_enabled(ready)
 
     def _resize_roi_table(self):
         """Resize ROI table to match number of loaded ROIs."""
@@ -1719,12 +1815,14 @@ class MainWindow(QMainWindow):
             self.roi_table.setRowCount(num_rois)
 
     def _on_nuc_status(self, index: int, busy: bool, msg: str):
-        self.btn_nuc.setEnabled(not busy)
-        self.btn_nuc.setText("NUC in progress..." if busy else "Manual NUC")
+        if index == self._selected_index:
+            self.btn_nuc.setEnabled(not busy and self._cameras[index].connected)
+            self.btn_nuc.setText("NUC in progress..." if busy else "Manual NUC")
         self._log(f"Camera {index + 1}: {msg}")
 
     def _on_focus_status(self, index: int, busy: bool, msg: str):
-        self._set_focus_buttons_enabled(not busy)
+        if index == self._selected_index:
+            self._set_focus_buttons_enabled(not busy and self._cameras[index].connected)
         self._log(f"Camera {index + 1}: {msg}")
 
     def _update_roi_table(self, statistics: List[ROIStatistics]):
@@ -1753,13 +1851,21 @@ class MainWindow(QMainWindow):
         )
 
     def _on_alarms_changed(self, index: int, alarms: List[Alarm]):
-        """Reconcile selected camera's alarm table and ROI colors."""
+        """Store each camera's alarm set; reconcile the table only for the selected.
+
+        Every camera keeps its own alarm state internally. Only the selected
+        camera's alarm set is mirrored to the shared alarm table; the others
+        are simply cached so selection changes do not need to wait for a
+        fresh alarm emit.
+        """
+        runtime = self._cameras[index]
+        runtime.latest_alarms = alarms
+        active = {a.roi_name for a in alarms}
+        runtime.display.set_active_alarms(active)
         if index != self._selected_index:
             return
-        active = {a.roi_name for a in alarms}
         self._active_alarm_count = len(alarms)
-        runtime = self._cameras[self._selected_index]
-        runtime.display.set_active_alarms(active)
+        self._clear_alarm_table()
         self._sync_alarm_table(alarms)
         self._update_status_bar(self._last_proc_time)
 
@@ -1811,12 +1917,15 @@ class MainWindow(QMainWindow):
                 self._alarm_max_shown[name] = text
 
     def _clear_alarm_table(self):
-        """Clear all alarm rows and active-alarm coloring (e.g. on reconnect)."""
+        """Clear all alarm rows and per-table counters (e.g. on reconnect).
+
+        Does not touch the display's active-alarm coloring; that is owned by
+        the per-camera set_active_alarms calls in the alarm handlers.
+        """
         self.alarm_table.setRowCount(0)
         self._alarm_rows = {}
         self._alarm_max_shown = {}
         self._active_alarm_count = 0
-        self._cameras[self._selected_index].display.set_active_alarms([])
 
     def _log(self, msg: str):
         """Add message to event log."""
@@ -1827,8 +1936,14 @@ class MainWindow(QMainWindow):
         self.event_log.setTextCursor(cursor)
 
     def _on_mouse_move(self, index: int, x: int, y: int):
-        """Handle mouse movement over a camera display."""
-        runtime = self._cameras[index]
+        """Handle mouse movement over a camera display.
+
+        Only the selected camera reports mouse temperature. Hovering a
+        non-selected camera is ignored until that camera is selected.
+        """
+        if index != self._selected_index:
+            return
+        runtime = self._cameras[self._selected_index]
         if runtime.latest_temp is not None:
             if 0 <= y < runtime.latest_temp.shape[0] and 0 <= x < runtime.latest_temp.shape[1]:
                 temp = runtime.latest_temp[y, x]

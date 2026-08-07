@@ -6,13 +6,13 @@
 
   "alarm": {
     "enabled": true,
-    "temperature_limit": 50.0,
+    "temperature_limit": 40.0,
     "use_max_temperature": true
   },
 
   "nuc": {
     "auto_enabled": true,
-    "interval_seconds": 120
+    "interval_seconds": 240
   },
 
   "focus": {
