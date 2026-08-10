@@ -12,7 +12,7 @@
 
   "nuc": {
     "auto_enabled": true,
-    "interval_seconds": 240
+    "interval_seconds": 180
   },
 
   "focus": {

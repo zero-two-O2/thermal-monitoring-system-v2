@@ -1,3 +1,107 @@
+## 2026-08-10 17:10
+
+### What changed
+- Completed the fixed camera-to-tile mapping in `halcon_roi_validation.py`.
+- Added `HB25080011 -> Tile 4` to `CAMERA_TILE_MAP` (was missing; Tile 4 showed "No Camera").
+- Added `CAMERA_IP_MAP` with the four known device IPs (serial is still the authoritative identity).
+- Discovery serials are now `.strip()`-ed before matching, so a serial with trailing whitespace no longer reports "Not Found" for a present camera.
+- Tile identities are reserved at GUI startup (`_reserve_tile_identities`): all four tiles show their fixed serial before any discovery runs.
+- Startup logs `FIXED CAMERA TILE MAP`; discovery logs `Discovered <serial> -> Tile <N> (IP ...)`; unknown cameras log Serial + IP + "No fixed tile configured".
+### Why
+- Tile 4 had no serial key, so the fourth physical camera could never be placed. Whitespace in a discovered serial broke the serial lookup, and a discovery-order/whitespace mismatch left Tile 1 "Not Found".
+### Notes
+- Tile identity is permanent per serial; reconnect returns the camera to its own tile. Verify live: all four cameras land on their fixed tiles regardless of discovery/boot order.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
+## 2026-08-10 16:30
+
+### What changed
+- Fixed `CAMERA_TILE_MAP` serials in `halcon_roi_validation.py`: replaced the four stale numeric keys (`2852044887`, `2852001861`, `2852059078`, `2852019101`) with the real device serials `HB25100002` (Tile 1), `HB25100004` (Tile 2), `HB25100008` (Tile 3). Tile 4 stays unassigned until its serial is known.
+### Why
+- The old keys were NOT serials. `docs/Halcon_Parameters.md` proves `2852001861` is the decimal `[Device]GevDeviceIPAddress` (a link-local IP as integer: `169.254.24.69`) of the camera whose real serial is `HB25100004`. Discovery reads `DeviceSerialNumber`, so every configured camera reported "not found" and every discovered `HB...` camera reported "unknown serial / no tile assignment". No camera placed, no worker started.
+### Notes
+- Verify against live cameras: all three should land on Tile 1-3 and stream. Confirm the fourth camera (missing from repo) and add its serial to `CAMERA_TILE_MAP`.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
+## 2026-08-10 15:05
+
+### What changed
+- Fixed camera-to-tile assignment so each TV46L camera permanently owns a grid tile in the 2x2 layout.
+- Added authoritative `CAMERA_TILE_MAP` (serial -> tile index) in `halcon_roi_validation.py`; tiles are decided ONLY by serial number, never by discovery/connection/list/thread order.
+- `_discover_and_connect` now matches each discovered camera by serial and opens it in its predefined tile. Missing configured cameras keep a reserved "Not Found" tile; unknown serials are logged and never placed. Frames from a worker are routed by its serial/tile identity (`CameraWorker.serial` / `tile_index`).
+- Panel titles now show the reserved serial; connect logging reports "Camera serial X connected -> Tile N". No acquisition/framegrabber/FPS/NUC/focus/ROI/alarm logic changed.
+### Why
+- Before this change, cameras were assigned to tiles in discovery order, so a camera moving physically or reconnecting could appear in the wrong window position. Fixed physical camera positions require stable serial-keyed tiles.
+### Notes
+- Tile index constant for app lifetime: a camera that disconnects keeps its tile, and reconnecting returns to the same tile. Verify against live cameras: scramble boot order, then disconnect/reconnect one camera.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
+## 2026-08-10 15:05
+
+### What changed
+- Temporarily disabled the two Part 2 mechanisms suspected in the grab-timeout regression (#5322 -> #5312 disconnect after ~30s) behind module flags `ENABLE_AUTO_REASSIGN = False` and `ENABLE_PACKET_STATS = False` in `halcon_roi_validation.py`.
+- With `ENABLE_PACKET_STATS = False`, `_read_packet_statistics()` returns immediately: the `[Stream]GevStream*` counters are no longer polled from the worker while the GigEVision2 stream is active.
+- With `ENABLE_AUTO_REASSIGN = False`, `_handle_grab_timeout()` only logs + retries (no `_reassign_framegrabber`), and the `not connected` branch of `run()` never calls `_attempt_reconnect`. This kills the #5312 "remote port NodeMap / PrepareBuffers payload" failure triggered by our own close/reopen.
+- Untouched: grab_image_async loop, grab_image_start, open_framegrabber params, num_buffers, camera FPS, NUC, focus, calibration, ROI processing, and all FPS meters (acq/proc/display stay counter-based - FPS never calls HALCON). Packet fields in the periodic diagnostics emission now stay at their defaults.
+### Why
+- Part 2 (packet-statistics polling + diagnostics) is the prime suspect for destabilising live acquisition; the previous working version had neither. Need a 5-minute soak run to confirm which mechanism regressed before any real fix, per the isolation plan.
+### Notes
+- Flags are diagnostics, not a fix. After a stable 5-minute run, re-enable `ENABLE_PACKET_STATS` first to confirm packet polling is the trigger; if the camera still times out, diff the grab loop against the last known working commit next. `ENABLE_AUTO_REASSIGN` should stay off until the root cause is known so our own reconnect can never produce #5312.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
+## 2026-08-10 13:20
+
+### What changed
+- Added real per-camera FPS measurements to replace the configured value: Acquisition FPS (successful grabs, measured in CameraWorker via a ~1 s FrameRateMeter), Processing FPS (frames that finish grab -> temperature -> ROI stats -> alarm evaluation), and Display FPS (measured in HALCONDisplayWidget.display_frame at the actual GUI render point). CameraWorker now emits a ~1 Hz `diagnostics_changed` signal carrying a `CameraDiagnostics` object (acq/proc FPS, display FPS, processing ms, frame number).
+- Added GigE Vision packet statistics read in the worker thread once per second from the exact `[Stream]GevStream*` parameters already used by the project (GevStreamSeenPacketCount / LostPacketCount / DeliveredPacketCount / DuplicatePacketCount / ResendPacketCount). Counters are cumulative and labelled as such; Loss % is derived only from a reliable (seen > 0) baseline. Never queried from the GUI thread.
+- Reworked the layout: resizable QSplitter body with the 2x2 camera grid on the left (source stays 640x480, 4:3 preserved by the existing fit-rect mechanism) and a right-side vertical panel with Global Alarm Table / ROI Statistics / Event Log. Added a compact bottom diagnostic area below the mouse-temperature readout showing the selected camera's measured FPS, processing time, cumulative packet counters, zoom, active alarms, NUC countdown and alarm limit. Status bar now reports the real measured FPS instead of config["camera"]["fps"].
+- Added a SQLite persistence layer (`database/database_manager.py`) with tables `cameras`, `application_settings`, `alarm_settings`, `rois`. One-time migration imports config.json -> application_settings/alarm_settings and rois.json -> rois only when those tables are empty (populated DBs are never overwritten, ROIs never duplicated). ConfigManager now reads from SQLite when a DatabaseManager is supplied (database authoritative over JSON), while still loading once into memory. Workers load ROIs from the database at initialization/reload only; SQLite is never on the per-frame path. Palette, alarm limit and camera metadata are persisted on change/connect and restored on restart. config.json and rois.json are kept as backup.
+### Why
+- The status bar previously displayed the configured camera FPS instead of actual behaviour, hiding GUI lag and packet loss. The new layout moves alarm/ROI/event information to a dedicated right panel so camera feeds occupy the full left side, and configuration/ROI data needed a persistent store that survives restarts without manual JSON editing.
+### Notes
+- No acquisition architecture change: grab_image_start/grab_image_async, framegrabber config, num_buffers, frame rate, calibration, NUC, focus, reconnect and frame_ready are untouched. FrameRateMeter adds one counter increment per frame. Packet parameters are only read once per second. No frame queues added. Verification: py_compile + ruff clean; offscreen tests exercise migration idempotency, DB-over-JSON config precedence, per-camera diagnostics independence, DB ROI loading, palette/alarm-limit persistence and the new layout widgets. Hardware steps (FPS stability, packet counters, multi-camera, resize, NUC/focus, reconnect, restart restore) still require live validation.
+### Files Changed
+- halcon_roi_validation.py
+- database/__init__.py (new)
+- database/database_manager.py (new)
+- CHANGELOG.md
+
+## 2026-08-10 12:30
+
+### What changed
+- Fixed alarm limit changes not applying in live sessions. The previous mechanism pushed a new limit from the GUI to each worker via a queued PyQt signal (`alarm_limit_requested`). That signal was never delivered: `CameraWorker.run()` is a tight blocking loop (`grab_image_async` never returns to the worker thread's event loop), so queued slots are never dispatched. Now `MainWindow` calls `CameraWorker.set_alarm_limit()` directly; the worker stores the value under the existing mutex as `_pending_alarm_limit` and the acquisition loop applies it right before each `AlarmManager.evaluate`, the same mutex-flag pattern already used by `request_nuc`/`request_focus`.
+### Why
+- Operators reported the global Alarm Limit field appeared to update but live alarms kept using the old threshold. Root cause was broken signal delivery to a worker thread whose event loop is blocked by the acquisition loop, not the `AlarmManager` logic itself.
+### Notes
+- The signal `alarm_limit_requested` was removed entirely (single-file usage, no external/test references). Pre-start worker re-sync in `_start_worker` now calls `set_alarm_limit(self._alarm_limit)` directly. Validation: py_compile clean; offscreen test confirms pending value is stored, applied on the next frame, and a lowered limit triggers an alarm on the following `evaluate`.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
+## 2026-08-10 12:00
+
+### What changed
+- Added a global thermal palette selector to the toolbar (Palette dropdown) with palettes verified against the installed HALCON build via `set_lut()`: Temperature, Jet, Rainbow, Grayscale (`default` LUT). The palette is display-only: each `HALCONDisplayWidget.set_palette()` re-applies the HALCON LUT on its live window and redraws the currently stored frame; it never reacquires a frame and never modifies `latest_temp`, `ROIStatistics`, alarms or mouse temperature. The selection is global (all four displays), matching the existing read-only `ConfigManager` design, so it is not written back to `config.json`.
+- Made the alarm table GLOBAL across all cameras. It now shows `Camera | ROI | Time | Current Max | Limit | Status` and aggregates the active alarms of every connected camera regardless of the selected camera. Rows are keyed by `(camera_index, roi_name)` in `_alarm_rows` / `_alarm_max_shown` so Camera 1 ROI 5 and Camera 2 ROI 5 are distinct rows. Each worker keeps its own `AlarmManager`; `MainWindow._on_alarms_changed` caches per-camera `latest_alarms` and `_sync_global_alarm_table()` reconciles all of them. Disconnecting a camera drops only its rows. Per-camera display red colouring is unchanged.
+- Added an editable GLOBAL alarm limit to the toolbar (`Alarm Limit: [value] °C [Apply]`). Apply validates the input (numeric, finite, positive) and, when valid, updates `MainWindow._alarm_limit`, pushes the new limit to every connected worker via a new `CameraWorker.alarm_limit_requested` signal delivered queued to the worker thread (runs `AlarmManager.set_limit` where `evaluate` runs; no lock/polling), and refreshes the alarm table Limit column and status bar immediately. Invalid input leaves the limit unchanged and logs/status-bar shows an error. Newly connected workers are re-synced to the current GUI limit in `_start_worker`.
+- Removed the Benchmark button and all related code (`btn_benchmark`, `_on_benchmark`); also dropped the now-unused `QTimer` import.
+### Why
+- Operators need to switch the thermal display palette without affecting temperature data; need to see alarms from all cameras simultaneously; and need to adjust the alarm threshold at runtime without restarting cameras or touching config files. The Benchmark button only printed a placeholder and was removed.
+### Notes
+- HALCON limitation discovered: the installed build accepts only `default`, `inverse`, `sqr`, `inv_sqr`, `cube`, `inv_cube`, `sqrt`, `inv_sqrt`, `cubic_root`, `inv_cubic_root`, `three`, `six`, `twelve`, `twenty_four`, `color1..4`, `rainbow`, `temperature`, `cyclic_gray`, `cyclic_temperature`, `hsi`, `change1..3`, `jet`, `inverse_jet`, `batlow`, `inverse_batlow`. The suggested `inferno`, `turbo`, `hot`, `viridis`, `plasma`, `grayscale` are NOT supported (`HALCON error #5163`) and are therefore not exposed.
+- No acquisition/calibration/ROI/NUC/focus code changed. Verified offscreen (no hardware): palette propagation to all 4 displays, global alarm aggregation with `(camera, roi)` keys, per-camera row removal on disconnect, limit apply/reject, per-camera max-cell refresh, and queued limit delivery to the worker thread (pre-start and runtime emit). Hardware validation steps still required per task checklist.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
 ## 2026-08-07 19:30
 
 ### What changed
