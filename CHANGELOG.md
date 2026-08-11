@@ -1,3 +1,18 @@
+## 2026-08-11 18:20
+
+### What changed
+- Startup no longer blocks the GUI in `halcon_roi_validation.py`. SQL connect, camera/ROI-config loading and HALCON GigE discovery now run on a dedicated `StartupWorker` QThread started after `window.show()`. The window appears immediately, shows "Initializing..." status, and stays fully usable; completion or failure is reported through signals. SQL failure or HALCON discovery failure no longer freezes or crashes the GUI.
+- Added per-camera POSITION support. Each camera owns its own `camera_positions`; ROI sets are now `Camera + Position -> ROIs` instead of `Camera -> ROIs`. New toolbar controls `Position: N` + `Next Position` operate on the selected camera only and wrap around its enabled positions. Changing one camera's position never touches the others.
+- Position switch replaces only the active ROI regions for the selected camera (worker-side `request_position`/`_apply_position` inside the acquisition loop); no reconnect, no NUC, no acquisition restart. Alarm limits remain camera-specific and unchanged.
+- `DatabaseRepository` added `load_camera_positions()` and an optional `position_id` filter on `load_rois()`; schema probes keep legacy databases (no `position_id` column / no `camera_positions` table) working with the old camera-wide ROI set.
+### Why
+- Slow SQL/HALCON startup previously froze the GUI. Positions let the pan/tilt system later move a camera between ROI sets without touching acquisition.
+### Notes
+- SQL schema requires two changes (see below) for position support; the code degrades gracefully without them. Camera acquisition, TV46LCamera, calibration and alarm logic untouched. Verified with `py_compile`, ruff (no new error classes vs baseline), and standalone smoke tests of the init flow, position wrap and per-camera independence. HALCON runtime and real cameras not available in the dev environment, so live validation is still required.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
 ## 2026-08-11 14:45
 
 ### What changed

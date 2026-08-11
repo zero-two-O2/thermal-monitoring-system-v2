@@ -123,6 +123,16 @@ class ROIData:
 
 
 @dataclass
+class CameraPosition:
+    """One enabled camera position from dbo.camera_positions."""
+
+    id: int
+    camera_id: int
+    position_number: int
+    position_name: str
+
+
+@dataclass
 class ROIStatistics:
     name: str
     mean: float
@@ -160,6 +170,8 @@ class DatabaseRepository:
         self._conn = None
         self._app_settings: Dict[str, str] = {}
         self._has_camera_column = False
+        self._has_position_column = False
+        self._has_positions_table = False
         self.connected = False
         self.last_error = ""
 
@@ -200,6 +212,8 @@ class DatabaseRepository:
                     self.last_error = ""
                     logger.info("SQL connected (%s, driver %s)", server, driver)
                     self._has_camera_column = self._detect_alarm_camera_column()
+                    self._has_position_column = self._detect_rois_position_column()
+                    self._has_positions_table = self._detect_positions_table()
                     self._app_settings = self.load_application_settings()
                     return True
                 except Exception as exc:
@@ -258,17 +272,31 @@ class DatabaseRepository:
             return int(rows[0]["cnt"])
         return 0
 
-    def load_rois(self, camera_id: int) -> List[ROIData]:
-        """Return enabled ROI definitions for one camera.
+    def load_rois(
+        self, camera_id: int, position_id: Optional[int] = None
+    ) -> List[ROIData]:
+        """Return enabled ROI definitions for one camera, optionally per position.
+
+        When position_id is given and the schema exposes rois.position_id the
+        ROIs are filtered to that camera position (Camera + Position uniquely
+        determine the ROI set). Without a position, or on a legacy schema,
+        the camera-wide ROI set is returned.
 
         Field order is preserved exactly as the application consumed the
         legacy rois.json data: (y1, x1, y2, x2).
         """
-        rows = self._fetch_all(
-            "SELECT roi_name, y1, x1, y2, x2 FROM dbo.rois "
-            "WHERE camera_id = ? AND enabled = 1",
-            (camera_id,),
-        )
+        if position_id is not None and self._has_position_column:
+            rows = self._fetch_all(
+                "SELECT roi_name, y1, x1, y2, x2 FROM dbo.rois "
+                "WHERE camera_id = ? AND position_id = ? AND enabled = 1",
+                (camera_id, position_id),
+            )
+        else:
+            rows = self._fetch_all(
+                "SELECT roi_name, y1, x1, y2, x2 FROM dbo.rois "
+                "WHERE camera_id = ? AND enabled = 1",
+                (camera_id,),
+            )
         return [
             ROIData(
                 name=str(row["roi_name"]),
@@ -276,6 +304,26 @@ class DatabaseRepository:
                 x1=int(row["x1"]),
                 y2=int(row["y2"]),
                 x2=int(row["x2"]),
+            )
+            for row in rows
+        ]
+
+    def load_camera_positions(self, camera_id: int) -> List[CameraPosition]:
+        """Return enabled positions for one camera, ordered by position_number."""
+        if not self._has_positions_table:
+            return []
+        rows = self._fetch_all(
+            "SELECT id, camera_id, position_number, position_name "
+            "FROM dbo.camera_positions "
+            "WHERE camera_id = ? AND enabled = 1 ORDER BY position_number",
+            (camera_id,),
+        )
+        return [
+            CameraPosition(
+                id=int(row["id"]),
+                camera_id=int(row["camera_id"]),
+                position_number=int(row["position_number"]),
+                position_name=str(row["position_name"] or ""),
             )
             for row in rows
         ]
@@ -328,6 +376,30 @@ class DatabaseRepository:
         except Exception:
             return False
 
+    def _detect_rois_position_column(self) -> bool:
+        """Return True when dbo.rois exposes a position_id column.
+
+        Read-only probe so a legacy schema (no positions) keeps returning
+        the camera-wide ROI set instead of failing position-scoped queries.
+        """
+        try:
+            with self._conn.cursor() as cursor:
+                cursor.execute("SELECT TOP 0 position_id FROM dbo.rois")
+                cursor.fetchall()
+            return True
+        except Exception:
+            return False
+
+    def _detect_positions_table(self) -> bool:
+        """Return True when dbo.camera_positions exists."""
+        try:
+            with self._conn.cursor() as cursor:
+                cursor.execute("SELECT TOP 0 id FROM dbo.camera_positions")
+                cursor.fetchall()
+            return True
+        except Exception:
+            return False
+
     def close(self) -> None:
         """Close the underlying connection if it is open."""
         if self._conn is not None:
@@ -359,6 +431,9 @@ class CameraRuntime:
         self.connected = False
         self.alarm_limit = 0.0
         self.camera_db_id = None
+        self.positions: List[CameraPosition] = []
+        self.current_position_id: Optional[int] = None
+        self.current_position_number: Optional[int] = None
         self.latest_temp = None
         self.latest_statistics: List[ROIStatistics] = []
         self.current_focus = 0.0
@@ -560,6 +635,18 @@ class AlarmManager:
         if self._on_event is not None:
             self._on_event(roi_name, False, 0.0)
 
+    def clear(self) -> None:
+        """Drop every active alarm (used when the ROI set changes).
+
+        A position switch replaces the active ROI set, so alarms belonging
+        to the old ROIs must not persist across the switch.
+        """
+        names = list(self._alarms)
+        self._alarms.clear()
+        if self._on_event is not None:
+            for roi_name in names:
+                self._on_event(roi_name, False, 0.0)
+
 
 class CameraWorker(QObject):
     """Worker thread for camera acquisition and HALCON processing."""
@@ -574,6 +661,7 @@ class CameraWorker(QObject):
     nuc_countdown = pyqtSignal(int)
     packet_loss = pyqtSignal()
     stream_stats = pyqtSignal(object)
+    rois_changed = pyqtSignal(object, object)
     initialized = pyqtSignal()
     finished = pyqtSignal()
 
@@ -583,6 +671,7 @@ class CameraWorker(QObject):
         config: Optional[ConfigManager] = None,
         camera_id: Optional[int] = None,
         camera_number: Optional[int] = None,
+        position_id: Optional[int] = None,
         db: Optional[DatabaseRepository] = None,
         alarm_limit: Optional[float] = None,
         alarm_enabled: Optional[bool] = None,
@@ -593,6 +682,7 @@ class CameraWorker(QObject):
         self._config = config if config is not None else ConfigManager()
         self._camera_id = camera_id
         self._camera_number = camera_number
+        self._position_id = position_id
         self._db = db
         self._running = False
         self._mutex = QMutex()
@@ -606,6 +696,8 @@ class CameraWorker(QObject):
         self._nuc_requested = False
         self._focus_requested = False
         self._focus_step = 0
+        self._position_requested = False
+        self._pending_position_id = None
         self._frame_number = 0
         self._consecutive_failures = 0
         self._reconnect_count = 0
@@ -757,10 +849,11 @@ class CameraWorker(QObject):
             logger.warning("Unable to disable automatic NUC")
 
     def _load_rois(self) -> bool:
-        """Load this camera's ROI definitions from dbo.rois (SQL).
+        """Load this camera's active ROI definitions from dbo.rois (SQL).
 
-        ROIs are joined to the camera through rois.camera_id -> cameras.id
-        and only enabled = 1 rows are used. Coordinate interpretation is
+        When a position_id is assigned the ROIs are filtered to that camera
+        position (rois.position_id -> camera_positions.id); otherwise the
+        legacy camera-wide ROI set is used. Coordinate interpretation is
         identical to the legacy rois.json source: (y1, x1, y2, x2). When
         the database is unavailable the camera still connects and runs
         with an empty ROI set instead of crashing the application.
@@ -768,7 +861,7 @@ class CameraWorker(QObject):
         rois: List[ROIData] = []
         if self._db is not None and self._db.connected:
             if self._camera_id is not None:
-                rois = self._db.load_rois(self._camera_id)
+                rois = self._db.load_rois(self._camera_id, position_id=self._position_id)
             else:
                 self.log_message.emit(
                     "Camera has no database ID; ROI definitions unavailable"
@@ -777,11 +870,7 @@ class CameraWorker(QObject):
             self.log_message.emit("SQL database unavailable - ROI definitions unavailable")
             logger.error("SQL database unavailable; ROI definitions cannot be loaded")
 
-        self._roi_names = []
-        self._roi_coords = []
-        for roi in rois:
-            self._roi_names.append(roi.name)
-            self._roi_coords.append((roi.y1, roi.x1, roi.y2, roi.x2))
+        self._set_rois(rois)
 
         logger.info(
             "ROIs loaded for Camera %s: %d", self._camera_label(), len(self._roi_names)
@@ -789,8 +878,25 @@ class CameraWorker(QObject):
         self.log_message.emit(f"Loaded {len(self._roi_names)} ROIs")
         return True
 
+    def _set_rois(self, rois: List[ROIData]) -> None:
+        """Replace this camera's active ROI definition set.
+
+        New list objects are built before assignment so a GUI display that
+        already holds the previous names/coords reference keeps showing the
+        old snapshot instead of a half-mutated list.
+        """
+        names = []
+        coords = []
+        for roi in rois:
+            names.append(roi.name)
+            coords.append((roi.y1, roi.x1, roi.y2, roi.x2))
+        self._roi_names = names
+        self._roi_coords = coords
+        self._roi_regions = None
+        self._generate_halcon_regions()
+
     def _generate_halcon_regions(self):
-        """Generate HALCON region objects from parallel arrays (once only)."""
+        """Generate HALCON region objects from parallel arrays."""
         if not self._roi_coords:
             return
 
@@ -813,6 +919,46 @@ class CameraWorker(QObject):
         self._focus_requested = True
         self._focus_step = step_mm
         self._mutex.unlock()
+
+    def request_position(self, position_id: int):
+        """Queue a camera-position switch for the acquisition loop.
+
+        Only the active ROI set changes; the camera, framegrabber and
+        acquisition thread are never touched. The switch executes inside
+        the acquisition loop so all HALCON region work happens on the
+        worker thread, never the GUI thread.
+        """
+        self._mutex.lock()
+        self._position_requested = True
+        self._pending_position_id = position_id
+        self._mutex.unlock()
+
+    def _apply_position(self, position_id: int):
+        """Load the ROI set for (camera, position) and rebuild regions.
+
+        Runs in the acquisition thread. The thermal stream keeps running;
+        only the ROI definitions are replaced. Alarm state is cleared so
+        stale alarms from the old ROI set cannot persist across a switch.
+        """
+        if self._position_id == position_id:
+            self.rois_changed.emit(self._roi_names, self._roi_coords)
+            return
+
+        self._position_id = position_id
+        rois: List[ROIData] = []
+        if self._db is not None and self._db.connected:
+            if self._camera_id is not None:
+                rois = self._db.load_rois(self._camera_id, position_id=position_id)
+
+        self._set_rois(rois)
+        self._alarm_manager.clear()
+        self._last_emitted_alarms = set()
+        self.alarms_changed.emit(self._alarm_manager.active_alarms)
+        self.rois_changed.emit(self._roi_names, self._roi_coords)
+        logger.info(
+            "Camera %s position %s active: %d ROI(s)",
+            self._camera_label(), position_id, len(self._roi_names),
+        )
 
     def set_alarm_limit(self, limit: float) -> None:
         """Update this camera's runtime alarm limit (thread-safe)."""
@@ -1190,6 +1336,9 @@ class CameraWorker(QObject):
                 if self._focus_requested:
                     self._execute_focus(self._focus_step)
                     self._focus_requested = False
+                if self._position_requested:
+                    self._apply_position(self._pending_position_id)
+                    self._position_requested = False
                 self._mutex.unlock()
 
                 # Periodic drift/timing report (every ~90 frames).
@@ -1703,7 +1852,7 @@ class HALCONDisplayWidget(QWidget):
                             ha.set_color(self._window_handle, color)
                             ha.disp_rectangle1(self._window_handle, y1, x1, y2, x2)
 
-                            label = f"{stat.name}: {stat.mean:.1f}°C"
+                            label = f"{stat.name}: {stat.minimum:.1f}°C"
                             ha.disp_text(self._window_handle, label, "image",
                                          y1 - 15, x1, color, [], [])
                     except ValueError:
@@ -1747,6 +1896,7 @@ class CameraPanel(QWidget):
         self.config = config
         self._connected = False
         self._selected = False
+        self._position_number: Optional[int] = None
         # Expanding lets the grid split all available space between the four
         # cells; the display inside fills the rest. No fixed size anywhere
         # in the panel chain, so resizing the window scales every camera.
@@ -1769,13 +1919,22 @@ class CameraPanel(QWidget):
 
     def _title_text(self) -> str:
         state = "Connected" if self._connected else "Disconnected"
-        base = f"Camera {self.index + 1} | {state}"
+        position = (
+            f" | Position {self._position_number}"
+            if self._position_number is not None else ""
+        )
+        base = f"Camera {self.index + 1}{position} | {state}"
         if self._selected:
             return f"{base} | SELECTED"
         return base
 
     def set_connected(self, connected: bool) -> None:
         self._connected = connected
+        self.title_label.setText(self._title_text())
+
+    def set_position(self, position_number: Optional[int]) -> None:
+        """Show this camera's current position in the panel title."""
+        self._position_number = position_number
         self.title_label.setText(self._title_text())
 
     def set_selected(self, selected: bool) -> None:
@@ -1796,6 +1955,89 @@ class CameraPanel(QWidget):
             self.setStyleSheet("")
 
 
+class StartupWorker(QObject):
+    """Background initialization: SQL connect, config load, HALCON discovery.
+
+    Runs on a dedicated QThread owned by MainWindow. Every blocking stage
+    (SQL connection/queries, camera-position and ROI-config loading, HALCON
+    GigE discovery) executes here so the GUI thread never freezes. Failures
+    are reported through signals; the window stays responsive either way.
+    """
+
+    status = pyqtSignal(str)
+    sql_connected = pyqtSignal()
+    sql_failed = pyqtSignal(str)
+    initialization_complete = pyqtSignal(object, object)
+    initialization_failed = pyqtSignal(str)
+    finished = pyqtSignal()
+
+    def __init__(self, db: DatabaseRepository) -> None:
+        super().__init__()
+        self._db = db
+
+    def run(self) -> None:
+        self.status.emit("Initializing: connecting to SQL")
+        sql_ok = self._db.connect()
+        if sql_ok:
+            self.sql_connected.emit()
+        else:
+            error = self._db.last_error or "SQL connection failed"
+            logger.error("Startup SQL connection failed: %s", error)
+            self.sql_failed.emit(error)
+            self.status.emit("Initializing: SQL unavailable; continuing")
+
+        bundle: Dict[str, Any] = {
+            "camera_rows": [],
+            "disabled_count": 0,
+            "positions": {},
+            "per_camera_alarm": {},
+            "global_alarm": None,
+        }
+        if sql_ok:
+            self.status.emit("Initializing: loading camera configuration")
+            bundle["camera_rows"] = self._db.load_cameras()
+            bundle["disabled_count"] = self._db.count_disabled_cameras()
+            self.status.emit("Initializing: loading positions and ROI configuration")
+            bundle["positions"] = self._load_all_positions(bundle["camera_rows"])
+            bundle["global_alarm"] = self._db.load_alarm_settings()
+            if self._db.has_camera_column:
+                for row in bundle["camera_rows"]:
+                    camera_id = row.get("id")
+                    if camera_id is not None:
+                        settings = self._db.load_alarm_settings(int(camera_id))
+                        if settings is not None:
+                            bundle["per_camera_alarm"][int(camera_id)] = settings
+
+        self.status.emit("Initializing: discovering cameras (HALCON)")
+        discovered: List[CameraInfo] = []
+        try:
+            discovery = CameraDiscovery()
+            discovered = discovery.discover()
+        except Exception as exc:
+            logger.exception("HALCON camera discovery failed")
+            self.initialization_failed.emit(str(exc))
+            self.status.emit(f"Initializing: camera discovery failed ({exc})")
+            self.finished.emit()
+            return
+
+        self.initialization_complete.emit(discovered, bundle)
+        self.status.emit("Initialization complete")
+        self.finished.emit()
+
+    def _load_all_positions(
+        self, camera_rows: List[Dict[str, Any]]
+    ) -> Dict[int, List[CameraPosition]]:
+        """Load enabled positions for every camera (camera_id -> positions)."""
+        positions: Dict[int, List[CameraPosition]] = {}
+        for row in camera_rows:
+            camera_id = row.get("id")
+            if camera_id is not None:
+                positions[int(camera_id)] = self._db.load_camera_positions(
+                    int(camera_id)
+                )
+        return positions
+
+
 class MainWindow(QMainWindow):
     """Main application window managing four independent cameras."""
 
@@ -1809,6 +2051,14 @@ class MainWindow(QMainWindow):
         self._db = db
         self.setWindowTitle("HALCON ROI Validation Tool - TV46L")
         self.resize(1280, 800)
+
+        # Background initialization state. _init_bundle carries the SQL data
+        # preloaded by StartupWorker so no SQL query ever runs on the GUI
+        # thread; _init_thread owns the worker while it is running. Set
+        # before _load_alarm_defaults is consulted during __init__.
+        self._init_bundle: Optional[Dict[str, Any]] = None
+        self._init_thread = None
+        self._init_worker = None
 
         self._cameras: List[CameraRuntime] = [
             CameraRuntime(i) for i in range(CAMERA_COUNT)
@@ -1935,6 +2185,19 @@ class MainWindow(QMainWindow):
         self.btn_alarm_apply.setToolTip("Apply the alarm limit to the selected camera only")
         self.btn_alarm_apply.clicked.connect(self._on_alarm_limit_apply)
         toolbar.addWidget(self.btn_alarm_apply)
+
+        toolbar.addSeparator()
+
+        self.lbl_position = QLabel("Position: --")
+        toolbar.addWidget(self.lbl_position)
+
+        self.btn_next_position = QPushButton("Next Position")
+        self.btn_next_position.setToolTip(
+            "Move the selected camera to its next enabled position"
+        )
+        self.btn_next_position.clicked.connect(self._on_next_position)
+        self.btn_next_position.setEnabled(False)
+        toolbar.addWidget(self.btn_next_position)
 
         parent_layout.addWidget(toolbar)
 
@@ -2124,8 +2387,8 @@ class MainWindow(QMainWindow):
             f"Active Alarms: 0 | Next NUC: -"
         )
 
-    def _discover_and_connect(self):
-        """Discover cameras and assign tiles according to the database.
+    def _finish_connect(self, discovered: List[CameraInfo]) -> None:
+        """Assign already-discovered cameras to tiles.
 
         When SQL is available the enabled cameras in dbo.cameras define
         which logical tiles exist; camera_number determines the tile and
@@ -2134,11 +2397,8 @@ class MainWindow(QMainWindow):
         unavailable the previous discovery-order behaviour is used as a
         graceful fallback.
         """
-        discovery = CameraDiscovery()
-        cameras = discovery.discover()
-
         if self._db is not None and self._db.connected:
-            self._connect_from_database(cameras)
+            self._connect_from_database(discovered)
             self._report_per_camera_alarm_limitation()
             return
 
@@ -2147,7 +2407,7 @@ class MainWindow(QMainWindow):
                 f"SQL database unavailable ({self._db.last_error}) - "
                 "using discovery order"
             )
-        self._connect_from_discovery(cameras)
+        self._connect_from_discovery(discovered)
 
     def _connect_from_database(self, discovered: List[CameraInfo]):
         """Assign discovered cameras to tiles using dbo.cameras.
@@ -2155,10 +2415,16 @@ class MainWindow(QMainWindow):
         Each enabled camera is matched to a discovered device by serial
         number (IP as fallback), then placed on the tile given by its
         camera_number. The camera id is carried into the worker so ROI
-        definitions are loaded per camera from SQL dbo.rois.
+        definitions are loaded per camera from SQL dbo.rois. Camera rows,
+        positions and alarm defaults come from the preloaded initialization
+        bundle, so no SQL query runs on the GUI thread.
         """
-        db_cameras = self._db.load_cameras()
-        disabled_count = self._db.count_disabled_cameras()
+        bundle = self._init_bundle or {}
+        db_cameras = bundle.get("camera_rows")
+        if not db_cameras:
+            db_cameras = self._db.load_cameras()
+        disabled_count = bundle.get("disabled_count", 0)
+        positions_map = bundle.get("positions", {})
         logger.info("Cameras loaded: %d", len(db_cameras))
         if disabled_count:
             logger.info("Disabled cameras skipped: %d", disabled_count)
@@ -2194,10 +2460,22 @@ class MainWindow(QMainWindow):
                 continue
             runtime.camera_info = camera_info
             runtime.camera_db_id = row.get("id")
+            positions = list(positions_map.get(runtime.camera_db_id) or [])
+            runtime.positions = positions
+            if positions:
+                runtime.current_position_id = positions[0].id
+                runtime.current_position_number = positions[0].position_number
+            else:
+                runtime.current_position_id = None
+                runtime.current_position_number = None
             defaults = self._load_alarm_defaults(runtime.camera_db_id)
             runtime.alarm_limit = defaults["temperature_limit"]
             self._log(f"Camera {tile + 1} discovered: {serial} ({ip})")
-            self._start_worker(runtime, alarm_defaults=defaults)
+            self._start_worker(
+                runtime,
+                alarm_defaults=defaults,
+                position_id=runtime.current_position_id,
+            )
 
     def _connect_from_discovery(self, discovered: List[CameraInfo]):
         """Fallback: assign cameras by discovery order (SQL unavailable)."""
@@ -2210,6 +2488,9 @@ class MainWindow(QMainWindow):
             if i < len(discovered):
                 runtime.camera_info = discovered[i]
                 runtime.camera_db_id = None
+                runtime.positions = []
+                runtime.current_position_id = None
+                runtime.current_position_number = None
                 runtime.alarm_limit = default_limits["temperature_limit"]
                 self._log(
                     f"Camera {i + 1} discovered: "
@@ -2220,7 +2501,10 @@ class MainWindow(QMainWindow):
                 self._panels[i].title_label.setText(f"Camera {i + 1} | No Camera")
 
     def _start_worker(
-        self, runtime: CameraRuntime, alarm_defaults: Optional[Dict[str, Any]] = None
+        self,
+        runtime: CameraRuntime,
+        alarm_defaults: Optional[Dict[str, Any]] = None,
+        position_id: Optional[int] = None,
     ):
         """Create and start the worker thread for one camera."""
         if runtime.camera_info is None:
@@ -2235,6 +2519,7 @@ class MainWindow(QMainWindow):
             self._config,
             camera_id=runtime.camera_db_id,
             camera_number=runtime.index + 1,
+            position_id=position_id,
             db=self._db,
             alarm_limit=float(alarm_defaults["temperature_limit"]),
             alarm_enabled=alarm_defaults["enabled"],
@@ -2269,6 +2554,9 @@ class MainWindow(QMainWindow):
         runtime.worker.stream_stats.connect(
             lambda stats, i=runtime.index: self._on_stream_stats(i, stats)
         )
+        runtime.worker.rois_changed.connect(
+            lambda names, coords, i=runtime.index: self._on_rois_changed(i, names, coords)
+        )
 
         # Worker owns the acquisition loop. When run() returns it emits
         # finished; the thread then quits and cleans up its own objects.
@@ -2281,13 +2569,72 @@ class MainWindow(QMainWindow):
         runtime.worker_thread.start()
 
     def _on_connect(self):
-        """Handle connect button - build fresh workers for all cameras.
+        """Handle connect button - run background initialization.
 
-        After Disconnect every worker and thread is destroyed, so a later
-        Connect rebuilds all cameras from scratch, exactly like a fresh
-        application startup.
+        SQL loading and HALCON discovery run on a worker thread so the GUI
+        stays responsive. A fresh worker is only started when no
+        initialization is already in progress.
         """
-        self._discover_and_connect()
+        self.start_initialization()
+
+    def start_initialization(self) -> None:
+        """Start background SQL/HALCON initialization without blocking the GUI.
+
+        The window appears immediately and stays usable while SQL connects,
+        camera/ROI configuration loads and HALCON discovery runs on a worker
+        thread. Completion or failure is reported back through signals and
+        never crashes the window.
+        """
+        if self._init_thread is not None and self._init_thread.isRunning():
+            self._log("Initialization already in progress")
+            return
+        self.btn_connect.setEnabled(False)
+        self.btn_connect.setText("Initializing...")
+        self.status_bar.showMessage("Initializing...")
+        self._init_thread = QThread()
+        self._init_worker = StartupWorker(self._db)
+        self._init_worker.moveToThread(self._init_thread)
+        self._init_worker.status.connect(self._on_init_status)
+        self._init_worker.sql_connected.connect(self._on_sql_connected)
+        self._init_worker.sql_failed.connect(self._on_sql_failed)
+        self._init_worker.initialization_complete.connect(
+            self._on_initialization_complete
+        )
+        self._init_worker.initialization_failed.connect(
+            self._on_initialization_failed
+        )
+        self._init_worker.finished.connect(self._init_thread.quit)
+        self._init_thread.finished.connect(self._init_worker.deleteLater)
+        self._init_thread.finished.connect(self._init_thread.deleteLater)
+        self._init_thread.started.connect(self._init_worker.run)
+        self._init_thread.start()
+
+    def _on_init_status(self, msg: str) -> None:
+        """Mirror initialization progress to the status bar."""
+        self.status_bar.showMessage(msg)
+
+    def _on_sql_connected(self) -> None:
+        self._log("SQL database connected")
+        if self._db.has_camera_column:
+            self._log("Per-camera alarm limits available")
+
+    def _on_sql_failed(self, msg: str) -> None:
+        self._log(f"SQL database unavailable: {msg}")
+        self.status_bar.showMessage("SQL unavailable - continuing with local configuration")
+
+    def _on_initialization_complete(self, discovered, bundle) -> None:
+        self._init_bundle = bundle
+        self.btn_connect.setText("Connect")
+        self.btn_connect.setEnabled(True)
+        self.status_bar.showMessage("Initialization complete - starting cameras")
+        self._log("Initialization complete")
+        self._finish_connect(discovered)
+
+    def _on_initialization_failed(self, msg: str) -> None:
+        self.btn_connect.setText("Connect")
+        self.btn_connect.setEnabled(True)
+        self.status_bar.showMessage(f"Camera discovery failed: {msg}")
+        self._log(f"Camera discovery failed: {msg}")
 
     def _disconnect_all(self):
         """Stop every camera independently and release its resources."""
@@ -2404,11 +2751,21 @@ class MainWindow(QMainWindow):
     def _load_alarm_defaults(self, camera_db_id: Optional[int]) -> Dict[str, Any]:
         """Return the default alarm configuration for a camera.
 
-        Uses dbo.alarm_settings when SQL is available; a per-camera row is
-        preferred when the schema exposes a camera_id column, otherwise the
-        single global row is the initial/default value. Falls back to
-        config.json/built-in defaults when SQL has no row.
+        After background initialization the preloaded bundle is used so no
+        SQL query ever runs on the GUI thread. Before initialization (or
+        without a bundle) dbo.alarm_settings is read directly when SQL is
+        available; a per-camera row is preferred when the schema exposes a
+        camera_id column, otherwise the single global row is the
+        initial/default value. Falls back to config.json/built-in defaults.
         """
+        bundle = self._init_bundle
+        if bundle is not None:
+            if camera_db_id is not None:
+                settings = bundle.get("per_camera_alarm", {}).get(camera_db_id)
+                if settings is not None:
+                    return self._defaults_from_settings(settings)
+            return self._defaults_from_settings(bundle.get("global_alarm"))
+
         settings = None
         db = self._db
         if db is not None and db.connected:
@@ -2416,6 +2773,12 @@ class MainWindow(QMainWindow):
                 settings = db.load_alarm_settings(camera_db_id)
             if settings is None:
                 settings = db.load_alarm_settings()
+        return self._defaults_from_settings(settings)
+
+    def _defaults_from_settings(
+        self, settings: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Build the alarm defaults dict from a SQL row or config fallback."""
         if settings is not None:
             return {
                 "temperature_limit": float(settings.get(
@@ -2493,6 +2856,8 @@ class MainWindow(QMainWindow):
         runtime = self._cameras[index]
         runtime.connected = connected
         self._panels[index].set_connected(connected)
+        if connected:
+            self._panels[index].set_position(runtime.current_position_number)
         any_connected = any(r.connected for r in self._cameras)
         self.btn_connect.setEnabled(not any_connected)
         self.btn_disconnect.setEnabled(any_connected)
@@ -2505,14 +2870,66 @@ class MainWindow(QMainWindow):
     def _set_selected_controls_enabled(self) -> None:
         """Enable per-camera toolbar controls only when the selected camera is connected.
 
-        Connect/Disconnect are global; every other toolbar action (focus, NUC)
-        targets only the selected camera, so its enabled state follows the
-        selected camera's connection.
+        Connect/Disconnect are global; every other toolbar action (focus, NUC,
+        Next Position) targets only the selected camera, so its enabled state
+        follows the selected camera's connection.
         """
         runtime = self._cameras[self._selected_index]
         ready = runtime.connected and runtime.worker is not None
         self.btn_nuc.setEnabled(ready)
         self._set_focus_buttons_enabled(ready)
+        self._update_position_label()
+
+    def _update_position_label(self) -> None:
+        """Show the selected camera's current position and the button state."""
+        runtime = self._cameras[self._selected_index]
+        position = runtime.current_position_number
+        self.lbl_position.setText(
+            f"Position: {position}" if position is not None else "Position: --"
+        )
+        has_positions = len(runtime.positions) > 1
+        ready = runtime.connected and runtime.worker is not None and has_positions
+        self.btn_next_position.setEnabled(ready)
+
+    def _on_next_position(self):
+        """Move the selected camera to its next enabled position (wrapping).
+
+        Position is per camera. Only the active ROI set of the selected
+        camera is replaced; the camera, framegrabber and acquisition thread
+        keep running. Other cameras are never touched.
+        """
+        runtime = self._cameras[self._selected_index]
+        if not runtime.positions or runtime.worker is None:
+            return
+        current_id = runtime.current_position_id
+        current_index = next(
+            (i for i, p in enumerate(runtime.positions) if p.id == current_id), -1
+        )
+        next_index = (current_index + 1) % len(runtime.positions)
+        target = runtime.positions[next_index]
+        runtime.current_position_id = target.id
+        runtime.current_position_number = target.position_number
+        runtime.worker.request_position(target.id)
+        self._panels[self._selected_index].set_position(target.position_number)
+        self._update_position_label()
+        name = target.position_name or "unnamed"
+        self._log(
+            f"Camera {self._selected_index + 1} -> Position "
+            f"{target.position_number} ({name})"
+        )
+
+    def _on_rois_changed(self, index: int, names: List[str], coords: List[tuple]):
+        """Apply a worker-side position switch to the camera display."""
+        runtime = self._cameras[index]
+        runtime.display.set_roi_data(names, coords)
+        self._log(
+            f"Camera {index + 1}: position {runtime.current_position_number} "
+            f"active ({len(names)} ROI(s))"
+        )
+        if index == self._selected_index:
+            runtime.latest_statistics = []
+            self.roi_table.setRowCount(len(names))
+            self._update_roi_table([])
 
     def _resize_roi_table(self):
         """Resize ROI table to match number of loaded ROIs."""
@@ -2763,6 +3180,9 @@ class MainWindow(QMainWindow):
         runtime.connected = False
 
     def closeEvent(self, event: QCloseEvent):
+        if self._init_thread is not None and self._init_thread.isRunning():
+            self._init_thread.quit()
+            self._init_thread.wait(3000)
         for runtime in self._cameras:
             self._shutdown_thread(runtime)
         event.accept()
@@ -2772,8 +3192,10 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
+    # SQL is NOT connected here: the window is built and shown immediately,
+    # then StartupWorker connects SQL and discovers cameras in the
+    # background. config.json defaults are used until SQL settings load.
     db_repo = DatabaseRepository()
-    db_repo.connect()
     config = ConfigManager(db=db_repo)
 
     dark_palette = app.palette()
@@ -2793,6 +3215,7 @@ def main():
 
     window = MainWindow(config, db=db_repo)
     window.show()
+    window.start_initialization()
 
     sys.exit(app.exec())
 
