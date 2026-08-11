@@ -367,6 +367,8 @@ class CameraRuntime:
         self.latest_alarms: List[Alarm] = []
         self.stream_stats: Optional[Dict[str, Any]] = None
         self.display_fps: float = 0.0
+        self.packet_total: int = 0
+        self.packet_loss_per_min: int = 0
 
 
 CAMERA_COUNT = 4
@@ -823,15 +825,12 @@ class CameraWorker(QObject):
             self._mutex.unlock()
 
     def _on_alarm_event(self, roi_name: str, active: bool, current_max: float):
-        """Log alarm transitions from the worker thread.
+        """Alarm transition hook.
 
-        Emits through log_message, which the GUI routes only to the event
-        log panel. Alarm events are never written to the terminal.
+        Intentionally silent. Alarm state is reflected only in the common
+        alarm table (via alarms_changed); printing every CLEAR/ACTIVE
+        transition here floods the event log, so nothing is emitted.
         """
-        if active:
-            self.log_message.emit(f"ALARM ACTIVE: {roi_name} at {current_max:.2f}°C")
-        else:
-            self.log_message.emit(f"ALARM CLEARED: {roi_name}")
 
     def _read_stream_stats(self) -> Dict[str, Any]:
         """Read GigE stream counters from the framegrabber.
@@ -1825,10 +1824,16 @@ class MainWindow(QMainWindow):
 
         self._active_alarm_count = 0
         self._nuc_remaining = -1
-        self._packet_loss_times = [deque() for _ in range(CAMERA_COUNT)]
         self._alarm_rows = {}
         self._alarm_max_shown = {}
         self._reported_limitation = False
+        # Per-camera HALCON GigE lost-packet tracking. _pkt_prev_lost keeps
+        # the previous cumulative counter so Packet Loss/min is the change
+        # between samples, never an invented value. A counter that goes
+        # backwards (reconnect / stream re-arm) resets the tracking instead
+        # of producing a false loss spike.
+        self._pkt_prev_lost = [None] * CAMERA_COUNT
+        self._pkt_delta_log = [deque() for _ in range(CAMERA_COUNT)]
 
         self._setup_ui()
 
@@ -2079,26 +2084,31 @@ class MainWindow(QMainWindow):
         return widget
 
     def _create_status_bar(self):
-        """Create status bar with live packet statistics for the selected camera."""
+        """Create status bar with live statistics for the selected camera.
+
+        Left message: feed size / zoom / active alarms / NUC countdown only.
+        Right permanent widgets: the selected camera's five statistics
+        (Acq / Proc / Disp FPS, Packet Loss/min, Total Packet Loss).
+        """
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self._last_proc_time = 0.0
         self.lbl_acq_fps = QLabel("Acq FPS: --")
         self.lbl_proc_fps = QLabel("Proc FPS: --")
         self.lbl_disp_fps = QLabel("Disp FPS: --")
-        self.lbl_packet_loss = QLabel("Packet Loss: n/a")
-        self.lbl_lost = QLabel("Lost: --")
+        self.lbl_packet_loss_min = QLabel("Packet Loss/min: --")
+        self.lbl_packet_total = QLabel("Total Packet Loss: --")
         self.lbl_acq_fps.setFont(QFont("Consolas", 9))
         self.lbl_proc_fps.setFont(QFont("Consolas", 9))
         self.lbl_disp_fps.setFont(QFont("Consolas", 9))
-        self.lbl_packet_loss.setFont(QFont("Consolas", 9))
-        self.lbl_lost.setFont(QFont("Consolas", 9))
+        self.lbl_packet_loss_min.setFont(QFont("Consolas", 9))
+        self.lbl_packet_total.setFont(QFont("Consolas", 9))
         for widget in (
             self.lbl_acq_fps,
             self.lbl_proc_fps,
             self.lbl_disp_fps,
-            self.lbl_packet_loss,
-            self.lbl_lost,
+            self.lbl_packet_loss_min,
+            self.lbl_packet_total,
         ):
             widget.setStyleSheet("padding: 0 6px;")
             self.status_bar.addPermanentWidget(widget)
@@ -2110,11 +2120,8 @@ class MainWindow(QMainWindow):
         self._disp_fps_timer.timeout.connect(self._update_display_fps)
         self._disp_fps_timer.start(1000)
         self.status_bar.showMessage(
-            f"Disconnected | Camera 1 selected | FPS: 0.0 | Processing: 0.0 ms | "
-            f"Frame: 0 ms | {FEED_W} x {FEED_H} | "
-            f"Packet loss: 0/min | "
-            f"Zoom: {self._cameras[self._selected_index].display.zoom_text} | "
-            f"Active Alarms: 0 | Alarm Limit: {self._selected_alarm_limit():.1f} °C"
+            f"{FEED_W} × {FEED_H} | Zoom: {self._cameras[self._selected_index].display.zoom_text} | "
+            f"Active Alarms: 0 | Next NUC: -"
         )
 
     def _discover_and_connect(self):
@@ -2259,9 +2266,6 @@ class MainWindow(QMainWindow):
         runtime.worker.nuc_countdown.connect(
             lambda seconds, i=runtime.index: self._on_nuc_countdown(i, seconds)
         )
-        runtime.worker.packet_loss.connect(
-            lambda i=runtime.index: self._on_packet_loss(i)
-        )
         runtime.worker.stream_stats.connect(
             lambda stats, i=runtime.index: self._on_stream_stats(i, stats)
         )
@@ -2292,6 +2296,12 @@ class MainWindow(QMainWindow):
             self._panels[i].set_connected(False)
             runtime.stream_stats = None
             runtime.display_fps = 0.0
+            runtime.packet_total = 0
+            runtime.packet_loss_per_min = 0
+            # Drop the per-camera counter state so a later reconnect starts
+            # from a fresh baseline (no stale spike from the old stream).
+            self._pkt_prev_lost[i] = None
+            self._pkt_delta_log[i].clear()
         self.btn_connect.setEnabled(True)
         self.btn_disconnect.setEnabled(False)
         self._set_selected_controls_enabled()
@@ -2463,17 +2473,6 @@ class MainWindow(QMainWindow):
     def _on_error(self, idx: int, msg: str):
         self._log(f"Camera {idx + 1} ERROR: {msg}")
 
-    def _on_packet_loss(self, index: int) -> None:
-        """Record one acquisition timeout for the rolling one-minute count."""
-        now = time.monotonic()
-        losses = self._packet_loss_times[index]
-        losses.append(now)
-        cutoff = now - 60.0
-        while losses and losses[0] < cutoff:
-            losses.popleft()
-        if index == self._selected_index:
-            self._update_status_bar(self._last_proc_time)
-
     def _on_log(self, msg: str):
         # Filter out per-frame messages - only log major events
         skip_patterns = [
@@ -2546,29 +2545,61 @@ class MainWindow(QMainWindow):
             self.roi_table.setItem(i, 5, QTableWidgetItem(f"{stat.deviation:.2f}"))
 
     def _update_status_bar(self, proc_time_ms: float):
-        """Update status bar with camera timing and current health values."""
-        fps = int(self._config.get("camera", "fps"))
-        frame_time_ms = 1000.0 / fps
-        now = time.monotonic()
-        losses = self._packet_loss_times[self._selected_index]
-        cutoff = now - 60.0
-        while losses and losses[0] < cutoff:
-            losses.popleft()
-        nuc_text = f"Next NUC: {self._nuc_remaining} s" if self._nuc_remaining >= 0 else "Next NUC: -"
+        """Update the fixed bottom-left status message for the selected camera.
+
+        Shows only feed size, zoom, active-alarm count and the auto-NUC
+        countdown. FPS / packet statistics belong exclusively to the
+        bottom-right permanent widgets; the alarm limit lives in the toolbar.
+        """
+        nuc_text = f"Next NUC: {self._nuc_remaining}s" if self._nuc_remaining >= 0 else "Next NUC: -"
+        zoom = self._cameras[self._selected_index].display.zoom_text
         self.status_bar.showMessage(
-            f"Connected | FPS: {fps}.0 | Processing: {proc_time_ms:.2f} ms | "
-            f"Frame: {frame_time_ms:.1f} ms | {FEED_W} x {FEED_H} | "
-            f"Packet loss: {len(losses)}/min | "
-            f"Zoom: {self._cameras[self._selected_index].display.zoom_text} | "
-            f"Active Alarms: {self._active_alarm_count} | {nuc_text} | "
-            f"Alarm Limit: {self._selected_alarm_limit():.1f} °C"
+            f"{FEED_W} × {FEED_H} | Zoom: {zoom} | "
+            f"Active Alarms: {self._active_alarm_count} | {nuc_text}"
         )
 
     def _on_stream_stats(self, index: int, stats: Dict[str, Any]) -> None:
-        """Store one camera's GigE stream statistics (emitted ~1/s)."""
-        self._cameras[index].stream_stats = stats
+        """Store one camera's GigE stream statistics (emitted ~1/s).
+
+        The raw cumulative lost-packet counter drives Total Packet Loss.
+        Packet Loss/min is derived from the change between consecutive
+        samples over a rolling one-minute window; HALCON stream counters
+        are used, never GUI frame drops.
+        """
+        runtime = self._cameras[index]
+        runtime.stream_stats = stats
+        runtime.packet_total = int(stats.get("lost", 0) or 0)
+        runtime.packet_loss_per_min = self._update_packet_loss_min(
+            index, runtime.packet_total
+        )
         if index == self._selected_index:
             self._update_packet_stats()
+
+    def _update_packet_loss_min(self, index: int, lost_now: int) -> int:
+        """Return lost packets during the last minute for one camera.
+
+        Accumulates the delta between consecutive cumulative HALCON lost
+        counters into a rolling one-minute window. Before a full minute of
+        samples exists the value reflects the elapsed interval only (it is
+        not scaled up to a synthetic full-minute figure). When the counter
+        goes backwards (reconnect / stream re-arm) the baseline restarts so
+        no false packet-loss spike is produced.
+        """
+        now = time.monotonic()
+        cutoff = now - 60.0
+        previous = self._pkt_prev_lost[index]
+        log = self._pkt_delta_log[index]
+
+        if previous is None or lost_now < previous:
+            self._pkt_prev_lost[index] = lost_now
+            log.clear()
+            return 0
+
+        self._pkt_prev_lost[index] = lost_now
+        log.append((now, lost_now - previous))
+        while log and log[0][0] < cutoff:
+            log.popleft()
+        return sum(delta for _, delta in log)
 
     def _update_display_fps(self) -> None:
         """Sample per-camera display FPS once per second."""
@@ -2578,29 +2609,23 @@ class MainWindow(QMainWindow):
         self._update_packet_stats()
 
     def _update_packet_stats(self) -> None:
-        """Show live packet statistics for the selected camera.
+        """Show the selected camera's five statistics on the right side only.
 
-        Acq/Proc FPS and the lost-packet counters come from the worker's GigE
+        Acq/Proc FPS and Total Packet Loss come from the worker's GigE
         stream statistics (HALCON stream counters). Display FPS is measured
-        from GUI frame delivery. The percentage is shown only when the stream
-        exposes a valid seen/lost ratio; otherwise it is labelled unavailable.
+        from GUI frame delivery. All values belong to the selected camera;
+        non-selected cameras are never combined into this readout.
         """
         runtime = self._cameras[self._selected_index]
         stats = runtime.stream_stats
         acq = stats.get("acquisition_fps", 0.0) if stats else 0.0
         proc = stats.get("processing_fps", 0.0) if stats else 0.0
-        lost = stats.get("lost", 0) if stats else 0
-        percent = stats.get("packet_loss_percent") if stats else None
-        available = stats.get("percentage_available", False) if stats else False
 
         self.lbl_acq_fps.setText(f"Acq FPS: {acq:.1f}")
         self.lbl_proc_fps.setText(f"Proc FPS: {proc:.1f}")
         self.lbl_disp_fps.setText(f"Disp FPS: {runtime.display_fps:.1f}")
-        if available and percent is not None:
-            self.lbl_packet_loss.setText(f"Packet Loss: {percent:.3f}%")
-        else:
-            self.lbl_packet_loss.setText("Packet Loss: n/a")
-        self.lbl_lost.setText(f"Lost: {lost}")
+        self.lbl_packet_loss_min.setText(f"Packet Loss/min: {runtime.packet_loss_per_min}")
+        self.lbl_packet_total.setText(f"Total Packet Loss: {runtime.packet_total}")
 
     def _on_alarms_changed(self, index: int, alarms: List[Alarm]):
         """Store each camera's alarm set and reconcile the global alarm table.

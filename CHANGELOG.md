@@ -1,3 +1,34 @@
+## 2026-08-11 14:45
+
+### What changed
+- Added `tests/diagnose_pipeline.py`, a standalone pipeline diagnostic for the TV46L GigE camera.
+- Observes only: discovers/opens one camera, streams via the existing `TV46LCamera` (unchanged), then measures acquisition interval/jitter, per-frame checksum duplicate detection, minimal processing time, latest-frame-wins publication, acquisition-to-display latency, acquisition/processing/display backlogs, HALCON GigE packet counters, process RSS memory, and GC counts.
+- Simple PyQt6 window shows the latest thermal frame plus live diagnostics; prints a diagnostic block every second and a final summary + evidence-based interpretation on Ctrl+C or `--duration N`.
+- CLI: `--serial SN` selects a camera, `--duration SECONDS` auto-stops (0 = Ctrl+C). Frame ID/age reported as `unavailable` when HALCON exposes no such parameter.
+### Why
+- Locate where the progressive video lag/freeze originates in the TV46L pipeline without modifying production code or camera settings.
+### Notes
+- No production code or camera settings touched. During a 60 s test run the camera was already degraded (0.6 FPS, avg interval 1579 ms, jitter 1709 ms, lost packets 190->7046); processing (0.8 ms), display (31 ms avg latency) and memory (flat ~128 MB) were stable, 0 duplicate frames. Verified with `py_compile` + ruff (clean).
+### Files Changed
+- tests/diagnose_pipeline.py
+- CHANGELOG.md
+
+## 2026-08-11 12:55
+
+### What changed
+- Bottom status bar reworked in `halcon_roi_validation.py`: the left message now shows only `640 × 480 | Zoom | Active Alarms | Next NUC`; the right side shows the selected camera's five statistics only (`Acq FPS`, `Proc FPS`, `Disp FPS`, `Packet Loss/min`, `Total Packet Loss`).
+- Duplicate status info removed: no more FPS/packet-loss/alarm-limit text in the left status message; alarm limit remains only in the top toolbar.
+- Alarm terminal flooding removed: `_on_alarm_event` no longer emits `ALARM ACTIVE/CLEARED` lines; alarm state lives only in the common alarm table, alarm detection/evaluation unchanged.
+- `Packet Loss/min` and `Total Packet Loss` now come from the HALCON GigE `[Stream]GevStreamLostPacketCount` counter. `Total` is the cumulative counter; `Per/min` is the change between consecutive samples over a rolling one-minute window. A backwards counter (reconnect / stream re-arm) resets the baseline instead of producing a false spike.
+- Removed the old grab-timeout based packet-loss counter and its signal wiring.
+### Why
+- The status bar mixed camera-wide and per-camera data, duplicated values, and the event log was flooded with per-transition alarm messages while the authoritative alarm table already exists.
+### Notes
+- Uses actual HALCON stream counters only; packet loss is never derived from image tearing or GUI frame drops. Before a full minute of samples exists, `Packet Loss/min` reflects the elapsed interval only (not scaled to a synthetic full-minute value). Worker/acquisition/threading untouched; verified via `py_compile`, ruff (same error count as baseline, no new violations), and a standalone rolling-window logic test (counter reset + window expiry). Live hardware with 2+ cameras still needed for visual confirmation.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
 ## 2026-08-11 10:25
 
 ### What changed
