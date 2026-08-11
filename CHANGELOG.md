@@ -1,3 +1,32 @@
+## 2026-08-11 10:25
+
+### What changed
+- Seeded the local `ThermalMonitor.dbo.cameras` table with the 4 known physical cameras (HB25100002/4/8, HB25080011 -> camera_number 1-4, model TV46L, enabled = 1, IP left NULL). Idempotent: existing serials are skipped.
+### Why
+- The cameras table was empty, so the SQL-driven connect correctly reported `Cameras loaded: 0` and no tiles were assigned even though 4 cameras were discovered. The app now loads `Cameras loaded: 4` and maps tiles by camera_number/serial.
+### Notes
+- Data-only change; schema untouched. `dbo.rois` and `dbo.alarm_settings` are still empty, so ROIs are absent and the global alarm default falls back to config.json (80.0 °C). ROIs can be loaded once rows are inserted.
+### Files Changed
+- halcon_roi_validation.py (unchanged this task)
+- CHANGELOG.md
+
+## 2026-08-11 10:15
+
+### What changed
+- Replaced JSON/config data sources in `halcon_roi_validation.py` with the `ThermalMonitor` SQL Server database (Part 2 of the DB migration; no other file touched).
+- Cameras now come from `dbo.cameras`: enabled cameras only, ordered by `camera_number`, matched to discovered devices by serial number (IP as fallback). `camera_number` decides the 2x2 tile, so the fixed serial-to-tile behaviour is preserved and discovery order is never used. Disabled cameras (`enabled = 0`) are skipped.
+- ROIs now load from `dbo.rois` joined through `rois.camera_id -> cameras.id`, only `enabled = 1`, keeping the existing `(y1, x1, y2, x2)` coordinate interpretation and all HALCON ROI math untouched. The `rois.json` loading path was removed; `rois.json` is no longer required.
+- Default alarm configuration (`temperature_limit`, `enabled`, `use_max_temperature`) loads from `dbo.alarm_settings`. Each camera now has its own runtime alarm limit: a toolbar `Alarm Limit` spinbox edits the selected camera's limit live through the worker's new `set_alarm_limit()`. Because the current schema has no `camera_id` column, per-camera limits live in application memory only and are not persisted back to SQL (reported once as a known limitation).
+- Settings with a clear `dbo.application_settings` equivalent now override `config.json` (mapping table `ConfigManager.CONFIG_TO_DB_KEY`); missing keys fall back to `config.json` and then built-in defaults.
+- New `DatabaseRepository`/`DatabaseConfig` in the same file: isolated connection config at the top (Windows Integrated Security by default, env-var overridable), graceful failure when SQL is unreachable (clear log/event-log error, no crash, discovery-order fallback). Startup now logs `SQL connected`, `Cameras loaded: N`, `Disabled cameras skipped: N`, and `ROIs loaded for Camera N: N`.
+### Why
+- Move all camera/ROI/alarm configuration out of JSON files and into the existing SQL Server schema, preparing per-camera alarm configuration while the database is still global.
+### Notes
+- Schema untouched; all SQL access is read-only. Acquisition loop, threading, HALCON acquisition, calibration, temperature conversion, NUC, focus and packet handling unchanged. Verified via `py_compile`, ruff (F-severity), and an end-to-end smoke test against a throwaway copy of the schema (31 checks: connect, camera ordering/tile assignment, disabled skip, per-camera ROI load, alarm defaults, application-settings overrides, worker wiring, graceful DB-down). Live hardware is still required to re-confirm streaming.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
 ## 2026-08-07 19:30
 
 ### What changed

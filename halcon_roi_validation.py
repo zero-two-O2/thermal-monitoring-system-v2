@@ -10,7 +10,7 @@ Processing workflow per frame:
 Architecture:
     Initialize Camera (open_framegrabber)
     Load Calibration
-    Load ROI JSON
+    Load ROI Definitions (SQL)
     Generate HALCON Regions Once (gen_rectangle1)
     Start Live Loop:
         Acquire Frame
@@ -26,18 +26,27 @@ import sys
 import time
 import json
 import logging
+import math
+import os
 import threading
+from collections import deque
 from types import SimpleNamespace
-from typing import List, Tuple, Optional, Dict, Callable
+from typing import Any, List, Tuple, Optional, Dict, Callable
 from dataclasses import dataclass
 
 import halcon as ha
 import numpy as np
-from PyQt6.QtCore import (QThread, pyqtSignal, QObject, QTimer, QMutex, Qt)
+
+try:
+    import pyodbc
+except ImportError:
+    pyodbc = None
+
+from PyQt6.QtCore import (QThread, pyqtSignal, QObject, QMutex, Qt, QTimer)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QGridLayout, QLabel, QPushButton,
-                              QTableWidget, QTableWidgetItem, QTextEdit,
-                              QStatusBar, QToolBar, QHeaderView,
+                              QDoubleSpinBox, QTableWidget, QTableWidgetItem,
+                              QTextEdit, QStatusBar, QToolBar, QHeaderView,
                               QSizePolicy)
 from PyQt6.QtGui import QFont, QColor, QCloseEvent
 
@@ -54,8 +63,46 @@ logger = logging.getLogger(__name__)
 
 FEED_W = 640
 FEED_H = 480
-ROI_JSON_PATH = "rois.json"
 CONFIG_PATH = "config.json"
+
+# Alarm limit validation range. Matches the toolbar spin box and the
+# existing application's thermal range; anything outside is rejected.
+MAX_ALARM_LIMIT = 2000.0
+MIN_ALARM_LIMIT = 0.0
+
+# Isolated SQL Server connection configuration (single source of truth).
+# Defaults use Windows Integrated Security so no credentials live in code.
+# Override through environment variables at deployment time.
+DB_SERVER = os.environ.get("TM_SQL_SERVER", "localhost\\SQLEXPRESS")
+DB_DATABASE = os.environ.get("TM_SQL_DATABASE", "ThermalMonitor")
+DB_TRUSTED_CONNECTION = os.environ.get("TM_SQL_AUTH", "trusted").lower() != "sql"
+DB_USERNAME = os.environ.get("TM_SQL_USERNAME", "")
+DB_PASSWORD = os.environ.get("TM_SQL_PASSWORD", "")
+DB_DRIVER_CANDIDATES: Tuple[str, ...] = (
+    "ODBC Driver 17 for SQL Server",
+    "ODBC Driver 18 for SQL Server",
+    "ODBC Driver 13 for SQL Server",
+    "SQL Server Native Client 11.0",
+    "SQL Server",
+)
+DB_SERVER_CANDIDATES: Tuple[str, ...] = (
+    DB_SERVER,
+    "localhost\\SQLEXPRESS",
+    ".\\SQLEXPRESS",
+    "localhost",
+    ".",
+)
+
+
+def _to_bool(value: Any) -> bool:
+    """Coerce a SQL/pyodbc value into a boolean."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 # Grab timeout for grab_image_async. At 9 FPS a frame arrives every ~111 ms,
 # so 500 ms tolerates a single skipped frame without wedging the stream.
@@ -85,6 +132,214 @@ class ROIStatistics:
     range_val: float
 
 
+@dataclass
+class DatabaseConfig:
+    """Isolated SQL Server connection settings (single source of truth)."""
+
+    server: str = DB_SERVER
+    database: str = DB_DATABASE
+    driver_candidates: Tuple[str, ...] = DB_DRIVER_CANDIDATES
+    server_candidates: Tuple[str, ...] = DB_SERVER_CANDIDATES
+    trusted_connection: bool = DB_TRUSTED_CONNECTION
+    username: str = DB_USERNAME
+    password: str = DB_PASSWORD
+
+
+class DatabaseRepository:
+    """Read-only SQL Server repository for the ThermalMonitor database.
+
+    Wraps a single pyodbc connection shared by every camera. Every query
+    here is a read; the schema is never modified and no tables or columns
+    are ever created. When SQL Server is unreachable the object stays
+    safely disconnected and exposes last_error so the caller can degrade
+    gracefully instead of crashing the application.
+    """
+
+    def __init__(self, config: Optional[DatabaseConfig] = None) -> None:
+        self._config = config if config is not None else DatabaseConfig()
+        self._conn = None
+        self._app_settings: Dict[str, str] = {}
+        self._has_camera_column = False
+        self.connected = False
+        self.last_error = ""
+
+    @property
+    def has_camera_column(self) -> bool:
+        """Whether dbo.alarm_settings exposes a camera_id column."""
+        return self._has_camera_column
+
+    def connect(self) -> bool:
+        """Open a SQL Server connection using the first working candidate.
+
+        Only ODBC drivers actually installed on the machine are tried, then
+        every candidate server. A short per-attempt timeout keeps a dead
+        database cheap to fail.
+        """
+        if self._conn is not None:
+            return True
+        if pyodbc is None:
+            self.last_error = "pyodbc is not installed; cannot connect to SQL Server"
+            logger.error(self.last_error)
+            return False
+
+        installed = set(pyodbc.drivers() or [])
+        drivers = [d for d in self._config.driver_candidates if d in installed]
+        if not drivers:
+            self.last_error = (
+                "No SQL Server ODBC driver installed; database cannot be reached"
+            )
+            logger.error(self.last_error)
+            return False
+
+        for server in self._config.server_candidates:
+            for driver in drivers:
+                conn_str = self._build_connection_string(server, driver)
+                try:
+                    self._conn = pyodbc.connect(conn_str, timeout=5, autocommit=True)
+                    self.connected = True
+                    self.last_error = ""
+                    logger.info("SQL connected (%s, driver %s)", server, driver)
+                    self._has_camera_column = self._detect_alarm_camera_column()
+                    self._app_settings = self.load_application_settings()
+                    return True
+                except Exception as exc:
+                    self.last_error = str(exc)
+
+        logger.error("SQL database unavailable: %s", self.last_error)
+        return False
+
+    def _build_connection_string(self, server: str, driver: str) -> str:
+        parts = [
+            f"DRIVER={{{driver}}}",
+            f"SERVER={server}",
+            f"DATABASE={self._config.database}",
+        ]
+        if self._config.trusted_connection:
+            parts.append("Trusted_Connection=yes")
+        else:
+            parts.append(f"UID={self._config.username}")
+            parts.append(f"PWD={self._config.password}")
+        return ";".join(parts)
+
+    def _fetch_all(
+        self, query: str, params: Optional[tuple] = None
+    ) -> List[Dict[str, Any]]:
+        """Run a read query and return rows as dicts keyed by column name."""
+        if not self.connected or self._conn is None:
+            self.last_error = "Database not connected"
+            return []
+        try:
+            with self._conn.cursor() as cursor:
+                if params:
+                    cursor.execute(query, params)
+                else:
+                    cursor.execute(query)
+                columns = [d[0] for d in cursor.description] if cursor.description else []
+                rows = cursor.fetchall()
+                return [dict(zip(columns, row)) for row in rows]
+        except Exception as exc:
+            self.last_error = str(exc)
+            logger.exception("SQL query failed: %s", query.strip().splitlines()[0])
+            return []
+
+    def load_cameras(self) -> List[Dict[str, Any]]:
+        """Return enabled cameras ordered by camera_number."""
+        return self._fetch_all(
+            "SELECT id, camera_number, serial, ip, model, enabled "
+            "FROM dbo.cameras WHERE enabled = 1 ORDER BY camera_number"
+        )
+
+    def count_disabled_cameras(self) -> int:
+        """Return number of cameras disabled in the database."""
+        rows = self._fetch_all(
+            "SELECT COUNT(*) AS cnt FROM dbo.cameras WHERE enabled = 0"
+        )
+        if rows:
+            return int(rows[0]["cnt"])
+        return 0
+
+    def load_rois(self, camera_id: int) -> List[ROIData]:
+        """Return enabled ROI definitions for one camera.
+
+        Field order is preserved exactly as the application consumed the
+        legacy rois.json data: (y1, x1, y2, x2).
+        """
+        rows = self._fetch_all(
+            "SELECT roi_name, y1, x1, y2, x2 FROM dbo.rois "
+            "WHERE camera_id = ? AND enabled = 1",
+            (camera_id,),
+        )
+        return [
+            ROIData(
+                name=str(row["roi_name"]),
+                y1=int(row["y1"]),
+                x1=int(row["x1"]),
+                y2=int(row["y2"]),
+                x2=int(row["x2"]),
+            )
+            for row in rows
+        ]
+
+    def load_alarm_settings(
+        self, camera_id: Optional[int] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Return the default alarm configuration from dbo.alarm_settings.
+
+        A per-camera row is returned first when camera_id is given and the
+        schema exposes a camera_id column; otherwise the single global row
+        is used as the initial/default value.
+        """
+        if camera_id is not None and self._has_camera_column:
+            rows = self._fetch_all(
+                "SELECT temperature_limit, enabled, use_max_temperature "
+                "FROM dbo.alarm_settings WHERE camera_id = ?",
+                (camera_id,),
+            )
+            if rows:
+                return rows[0]
+        rows = self._fetch_all(
+            "SELECT temperature_limit, enabled, use_max_temperature "
+            "FROM dbo.alarm_settings"
+        )
+        if not rows:
+            return None
+        return rows[0]
+
+    def load_application_settings(self) -> Dict[str, str]:
+        """Return every dbo.application_settings row as a key -> value map."""
+        rows = self._fetch_all("SELECT [key], [value] FROM dbo.application_settings")
+        return {str(row["key"]): str(row["value"]) for row in rows}
+
+    def get_application_setting(self, key: str) -> Optional[str]:
+        """Return one application setting value (cached at connect time)."""
+        return self._app_settings.get(key)
+
+    def _detect_alarm_camera_column(self) -> bool:
+        """Return True when dbo.alarm_settings has a camera_id column.
+
+        Read-only schema probe used to report whether per-camera alarm
+        limits could ever be persisted. No schema change is ever made here.
+        """
+        try:
+            with self._conn.cursor() as cursor:
+                cursor.execute("SELECT TOP 0 camera_id FROM dbo.alarm_settings")
+                cursor.fetchall()
+            return True
+        except Exception:
+            return False
+
+    def close(self) -> None:
+        """Close the underlying connection if it is open."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                logger.exception("Error closing SQL connection")
+            finally:
+                self._conn = None
+                self.connected = False
+
+
 class CameraRuntime:
     """Owns all runtime state for one camera instance.
 
@@ -102,23 +357,50 @@ class CameraRuntime:
         self.display = None
         self.title_label = None
         self.connected = False
+        self.alarm_limit = 0.0
+        self.camera_db_id = None
         self.latest_temp = None
         self.latest_statistics: List[ROIStatistics] = []
         self.current_focus = 0.0
         self.fps = 0.0
         self.processing_time_ms = 0.0
         self.latest_alarms: List[Alarm] = []
+        self.stream_stats: Optional[Dict[str, Any]] = None
+        self.display_fps: float = 0.0
 
 
 CAMERA_COUNT = 4
 
 
 class ConfigManager:
-    """Loads config.json once at startup and holds values in memory.
+    """Loads configuration with fixed precedence:
 
-    The JSON file is read a single time at construction. The processing
-    loop reads from memory only and never touches the filesystem.
+    dbo.application_settings (SQL) > config.json > built-in defaults.
+
+    config.json is read a single time at construction. A config.json value
+    is replaced by SQL only when the mapped dbo.application_settings key
+    actually exists in the table; otherwise it falls back to config.json
+    and then to built-in defaults.
     """
+
+    # config.json path -> dbo.application_settings key.
+    CONFIG_TO_DB_KEY = {
+        "camera.fps": "camera_fps",
+        "camera.reconnect_seconds": "camera_reconnect_seconds",
+        "camera.nuc_duration_seconds": "nuc_duration_seconds",
+        "camera.nuc_grab_retry_interval_ms": "nuc_grab_retry_interval_ms",
+        "camera.grab_timeout_before_reconnect_seconds": "grab_timeout_before_reconnect_seconds",
+        "alarm.enabled": "alarm_enabled",
+        "alarm.temperature_limit": "alarm_temperature_limit",
+        "alarm.use_max_temperature": "alarm_use_max_temperature",
+        "nuc.auto_enabled": "auto_nuc_enabled",
+        "nuc.interval_seconds": "nuc_interval_seconds",
+        "focus.default_focus_mm": "focus_default_focus_mm",
+        "focus.coarse_step_mm": "focus_coarse_step_mm",
+        "focus.fine_step_mm": "focus_fine_step_mm",
+        "display.palette": "display_palette",
+        "display.default_zoom": "display_default_zoom",
+    }
 
     DEFAULT_CONFIG = {
         "camera": {
@@ -138,8 +420,11 @@ class ConfigManager:
         "display": {"palette": "temperature", "default_zoom": 100},
     }
 
-    def __init__(self, path: str = CONFIG_PATH) -> None:
+    def __init__(
+        self, path: str = CONFIG_PATH, db: Optional[DatabaseRepository] = None
+    ) -> None:
         self._path = path
+        self._db = db
         self._data = self._load()
 
     def _load(self) -> Dict[str, dict]:
@@ -166,8 +451,33 @@ class ConfigManager:
         return merged
 
     def get(self, section: str, key: str):
-        """Return a config value from memory. Never touches the JSON file."""
-        return self._data.get(section, {}).get(key)
+        """Return a config value.
+
+        Precedence: SQL application_settings (when the mapped row exists),
+        then config.json, then built-in defaults. Never touches the JSON
+        file at read time.
+        """
+        value = self._data.get(section, {}).get(key)
+        if self._db is not None and self._db.connected:
+            db_key = self.CONFIG_TO_DB_KEY.get(f"{section}.{key}")
+            if db_key is not None:
+                db_value = self._db.get_application_setting(db_key)
+                if db_value is not None:
+                    return self._coerce_value(db_value, value)
+        return value
+
+    @staticmethod
+    def _coerce_value(db_value: str, default):
+        """Parse a SQL string into the type suggested by the fallback value."""
+        if isinstance(default, bool):
+            return _to_bool(db_value)
+        if isinstance(default, int):
+            return int(float(str(db_value).replace(",", "")))
+        if isinstance(default, float):
+            return float(str(db_value).replace(",", ""))
+        if default is None:
+            return db_value or None
+        return str(db_value)
 
 
 STATE_NORMAL = "NORMAL"
@@ -260,13 +570,28 @@ class CameraWorker(QObject):
     focus_status = pyqtSignal(bool, str)
     alarms_changed = pyqtSignal(object)
     nuc_countdown = pyqtSignal(int)
+    packet_loss = pyqtSignal()
+    stream_stats = pyqtSignal(object)
     initialized = pyqtSignal()
     finished = pyqtSignal()
 
-    def __init__(self, camera_info: CameraInfo, config: Optional[ConfigManager] = None):
+    def __init__(
+        self,
+        camera_info: CameraInfo,
+        config: Optional[ConfigManager] = None,
+        camera_id: Optional[int] = None,
+        camera_number: Optional[int] = None,
+        db: Optional[DatabaseRepository] = None,
+        alarm_limit: Optional[float] = None,
+        alarm_enabled: Optional[bool] = None,
+        alarm_use_max_temperature: Optional[bool] = None,
+    ):
         super().__init__()
         self._camera_info = camera_info
         self._config = config if config is not None else ConfigManager()
+        self._camera_id = camera_id
+        self._camera_number = camera_number
+        self._db = db
         self._running = False
         self._mutex = QMutex()
         self._framegrabber = None
@@ -301,12 +626,40 @@ class CameraWorker(QObject):
         self._last_nuc_time = time.time()
         self._last_nuc_emit_cd = 0.0
         self._last_emitted_alarms = set()
+        self._alarm_limit = self._resolve_alarm_limit(alarm_limit)
         self._alarm_manager = AlarmManager(
-            limit=float(self._config.get("alarm", "temperature_limit")),
-            enabled=bool(self._config.get("alarm", "enabled")),
-            use_max_temperature=bool(self._config.get("alarm", "use_max_temperature")),
+            limit=self._alarm_limit,
+            enabled=self._resolve_alarm_enabled(alarm_enabled),
+            use_max_temperature=self._resolve_alarm_use_max(alarm_use_max_temperature),
             on_event=self._on_alarm_event,
         )
+        # GigE stream statistics are sampled once per second (throttled) and
+        # reported through stream_stats. The frame counters track the FPS
+        # between consecutive samples.
+        self._last_stream_stats_emit = time.time()
+        self._last_stats_frame_number = 0
+
+    def _resolve_alarm_limit(self, value: Optional[float]) -> float:
+        """Per-camera limit when supplied, otherwise the SQL/config default."""
+        if value is not None:
+            return float(value)
+        return float(self._config.get("alarm", "temperature_limit"))
+
+    def _resolve_alarm_enabled(self, value: Optional[bool]) -> bool:
+        if value is not None:
+            return _to_bool(value)
+        return _to_bool(self._config.get("alarm", "enabled"))
+
+    def _resolve_alarm_use_max(self, value: Optional[bool]) -> bool:
+        if value is not None:
+            return _to_bool(value)
+        return _to_bool(self._config.get("alarm", "use_max_temperature"))
+
+    def _camera_label(self) -> str:
+        """Human-readable camera label for logs (tile number preferred)."""
+        if self._camera_number is not None:
+            return str(self._camera_number)
+        return str(self._camera_id)
 
     def initialize(self) -> bool:
         """Stage 1: Open framegrabber, connect camera, grab first image, load calibration, load ROIs, generate regions."""
@@ -402,28 +755,37 @@ class CameraWorker(QObject):
             logger.warning("Unable to disable automatic NUC")
 
     def _load_rois(self) -> bool:
-        """Load ROI coordinates from JSON file into parallel arrays."""
-        try:
-            with open(ROI_JSON_PATH, 'r') as f:
-                roi_list = json.load(f)
+        """Load this camera's ROI definitions from dbo.rois (SQL).
 
-            self._roi_names = []
-            self._roi_coords = []
+        ROIs are joined to the camera through rois.camera_id -> cameras.id
+        and only enabled = 1 rows are used. Coordinate interpretation is
+        identical to the legacy rois.json source: (y1, x1, y2, x2). When
+        the database is unavailable the camera still connects and runs
+        with an empty ROI set instead of crashing the application.
+        """
+        rois: List[ROIData] = []
+        if self._db is not None and self._db.connected:
+            if self._camera_id is not None:
+                rois = self._db.load_rois(self._camera_id)
+            else:
+                self.log_message.emit(
+                    "Camera has no database ID; ROI definitions unavailable"
+                )
+        else:
+            self.log_message.emit("SQL database unavailable - ROI definitions unavailable")
+            logger.error("SQL database unavailable; ROI definitions cannot be loaded")
 
-            for roi in roi_list:
-                self._roi_names.append(roi["name"])
-                self._roi_coords.append((roi["y1"], roi["x1"], roi["y2"], roi["x2"]))
+        self._roi_names = []
+        self._roi_coords = []
+        for roi in rois:
+            self._roi_names.append(roi.name)
+            self._roi_coords.append((roi.y1, roi.x1, roi.y2, roi.x2))
 
-            self.log_message.emit(f"Loaded {len(self._roi_names)} ROIs")
-            return True
-
-        except FileNotFoundError:
-            self.log_message.emit(f"ROI file not found: {ROI_JSON_PATH}")
-            return False
-        except Exception as e:
-            self.log_message.emit(f"Failed to load ROIs: {e}")
-            logger.exception("Failed to load ROIs")
-            return False
+        logger.info(
+            "ROIs loaded for Camera %s: %d", self._camera_label(), len(self._roi_names)
+        )
+        self.log_message.emit(f"Loaded {len(self._roi_names)} ROIs")
+        return True
 
     def _generate_halcon_regions(self):
         """Generate HALCON region objects from parallel arrays (once only)."""
@@ -436,14 +798,6 @@ class CameraWorker(QObject):
         cols2 = [c[3] for c in self._roi_coords]
 
         self._roi_regions = ha.gen_rectangle1(rows1, cols1, rows2, cols2)
-
-    def reload_rois(self):
-        """Reload ROI JSON and regenerate HALCON regions."""
-        if self._load_rois():
-            self._generate_halcon_regions()
-            self.log_message.emit("ROIs reloaded successfully")
-        else:
-            self.error_occurred.emit("Failed to reload ROIs")
 
     def request_nuc(self):
         """Request manual NUC execution."""
@@ -458,12 +812,70 @@ class CameraWorker(QObject):
         self._focus_step = step_mm
         self._mutex.unlock()
 
+    def set_alarm_limit(self, limit: float) -> None:
+        """Update this camera's runtime alarm limit (thread-safe)."""
+        self._mutex.lock()
+        try:
+            self._alarm_limit = float(limit)
+            self._alarm_manager.set_limit(self._alarm_limit)
+            self.log_message.emit(f"Alarm limit set to {self._alarm_limit:.1f} °C")
+        finally:
+            self._mutex.unlock()
+
     def _on_alarm_event(self, roi_name: str, active: bool, current_max: float):
-        """Log alarm transitions from the worker thread."""
+        """Log alarm transitions from the worker thread.
+
+        Emits through log_message, which the GUI routes only to the event
+        log panel. Alarm events are never written to the terminal.
+        """
         if active:
             self.log_message.emit(f"ALARM ACTIVE: {roi_name} at {current_max:.2f}°C")
         else:
             self.log_message.emit(f"ALARM CLEARED: {roi_name}")
+
+    def _read_stream_stats(self) -> Dict[str, Any]:
+        """Read GigE stream counters from the framegrabber.
+
+        Uses the actual HALCON acquisition/network statistics when the
+        connected device exposes them. A percentage is only reported when
+        a mathematically valid (seen > 0) ratio exists; otherwise the GUI
+        shows the raw lost count and labels the percentage unavailable.
+        """
+        stats: Dict[str, Any] = {
+            "lost": 0,
+            "seen": 0,
+            "delivered": 0,
+            "resend": 0,
+            "packet_loss_percent": None,
+            "percentage_available": False,
+        }
+        candidates = {
+            "lost": ("[Stream]GevStreamLostPacketCount", "GevStreamLostPacketCount"),
+            "seen": ("[Stream]GevStreamSeenPacketCount", "GevStreamSeenPacketCount"),
+            "delivered": ("[Stream]GevStreamDeliveredPacketCount", "GevStreamDeliveredPacketCount"),
+            "resend": ("[Stream]GevStreamResendPacketCount", "GevStreamResendPacketCount"),
+        }
+        for key, names in candidates.items():
+            for name in names:
+                try:
+                    stats[key] = int(ha.get_framegrabber_param(self._framegrabber, name))
+                    break
+                except Exception:
+                    continue
+
+        lost = stats["lost"]
+        seen = stats["seen"]
+        if seen > 0:
+            stats["packet_loss_percent"] = lost / seen * 100.0
+            stats["percentage_available"] = True
+        return stats
+
+    def _emit_stream_stats(self, acquisition_fps: float, processing_fps: float) -> None:
+        """Sample stream counters and emit them once per second."""
+        stats = self._read_stream_stats()
+        stats["acquisition_fps"] = acquisition_fps
+        stats["processing_fps"] = processing_fps
+        self.stream_stats.emit(stats)
 
     @staticmethod
     def _thread_id() -> int:
@@ -610,6 +1022,7 @@ class CameraWorker(QObject):
         """
         self._consecutive_failures += 1
         failed = self._consecutive_failures
+        self.packet_loss.emit()
         logger.warning(
             "Camera %s grab timeout (%d consecutive, frame=%d, thread=%d)",
             self._camera_info.serial, failed, self._frame_number, self._thread_id(),
@@ -711,7 +1124,7 @@ class CameraWorker(QObject):
                 halcon_temp_image = ha.himage_from_numpy_array(temp_frame.astype(np.float32))
 
                 statistics: List[ROIStatistics] = []
-                # ROIs may be absent (empty rois.json): without regions the
+                # ROIs may be absent (empty SQL result): without regions the
                 # batch statistics calls would crash, so skip them and emit
                 # an empty statistics list instead.
                 if self._roi_regions is not None:
@@ -750,6 +1163,20 @@ class CameraWorker(QObject):
 
                 # Pass numpy array instead of halcon image (thread-safe)
                 self.frame_ready.emit(temp_frame, statistics, proc_time_ms)
+
+                # GigE stream statistics are sampled once per ~1 second, not
+                # per frame, so the acquisition loop is not slowed by
+                # repeated framegrabber param reads.
+                stats_now = time.time()
+                if stats_now - self._last_stream_stats_emit >= 1.0:
+                    elapsed = stats_now - self._last_stream_stats_emit
+                    self._last_stream_stats_emit = stats_now
+                    frames = self._frame_number - self._last_stats_frame_number
+                    self._last_stats_frame_number = self._frame_number
+                    self._emit_stream_stats(
+                        frames / max(elapsed, 1e-9),
+                        frames / max(elapsed, 1e-9),
+                    )
 
                 self._mutex.lock()
                 now = time.time()
@@ -1292,7 +1719,7 @@ class HALCONDisplayWidget(QWidget):
         """Store which ROIs are in alarm so outlines/labels turn red."""
         self._active_alarms = set(names)
 
-    def set_roi_data(self, names: List[str], coords: List[Tuple]):
+    def set_roi_data(self, names: List[str], coords: List[tuple]):
         """Store ROI data for display."""
         self._roi_names = names
         self._roi_coords = coords
@@ -1373,28 +1800,47 @@ class CameraPanel(QWidget):
 class MainWindow(QMainWindow):
     """Main application window managing four independent cameras."""
 
-    def __init__(self, config: Optional[ConfigManager] = None):
+    def __init__(
+        self,
+        config: Optional[ConfigManager] = None,
+        db: Optional[DatabaseRepository] = None,
+    ):
         super().__init__()
         self._config = config if config is not None else ConfigManager()
+        self._db = db
         self.setWindowTitle("HALCON ROI Validation Tool - TV46L")
         self.resize(1280, 800)
 
         self._cameras: List[CameraRuntime] = [
             CameraRuntime(i) for i in range(CAMERA_COUNT)
         ]
+        # Seed every camera with the same default alarm limit before the
+        # UI is built; each camera keeps its own runtime limit from then on.
+        default_limits = self._load_alarm_defaults(None)
+        for runtime in self._cameras:
+            runtime.alarm_limit = default_limits["temperature_limit"]
+
         self._panels: List[CameraPanel] = []
         self._selected_index = 0
 
         self._active_alarm_count = 0
         self._nuc_remaining = -1
-        self._alarm_limit = float(self._config.get("alarm", "temperature_limit"))
+        self._packet_loss_times = [deque() for _ in range(CAMERA_COUNT)]
         self._alarm_rows = {}
         self._alarm_max_shown = {}
+        self._reported_limitation = False
 
         self._setup_ui()
 
     def _setup_ui(self):
-        """Create the GUI layout."""
+        """Create the GUI layout.
+
+        The toolbar spans the full width. Below it a horizontal split gives
+        the camera area the left ~2/3 and the information panel the right
+        ~1/3. The camera area holds the fixed 2x2 grid of live feeds plus the
+        mouse-temperature readout; the information panel holds the common
+        alarm table, the ROI statistics table and the event log.
+        """
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
@@ -1402,10 +1848,13 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(6)
 
         self._create_toolbar(main_layout)
-        self._create_camera_grid(main_layout)
-        self._create_mouse_temp(main_layout)
-        self._create_lower_section(main_layout)
-        self._create_event_log(main_layout)
+
+        content = QHBoxLayout()
+        content.setSpacing(8)
+        content.addWidget(self._create_camera_area(), stretch=2)
+        content.addWidget(self._create_info_panel(), stretch=1)
+        main_layout.addLayout(content, stretch=1)
+
         self._create_status_bar()
 
         # Default selection is Camera 1. All widgets above exist by now, so
@@ -1414,7 +1863,7 @@ class MainWindow(QMainWindow):
         self._refresh_selected_state()
 
     def _create_toolbar(self, parent_layout):
-        """Create toolbar with Connect, Disconnect, Reload ROI, Focus, NUC, Benchmark."""
+        """Create toolbar with Connect, Disconnect, Focus, NUC."""
         toolbar = QToolBar()
         toolbar.setMovable(False)
 
@@ -1426,13 +1875,6 @@ class MainWindow(QMainWindow):
         self.btn_disconnect.clicked.connect(self._on_disconnect)
         self.btn_disconnect.setEnabled(False)
         toolbar.addWidget(self.btn_disconnect)
-
-        self.btn_reload_roi = QPushButton("Reload ROI JSON")
-        self.btn_reload_roi.clicked.connect(self._on_reload_roi)
-        self.btn_reload_roi.setEnabled(False)
-        toolbar.addWidget(self.btn_reload_roi)
-
-        toolbar.addSeparator()
 
         toolbar.addSeparator()
 
@@ -1474,20 +1916,31 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        self.btn_benchmark = QPushButton("Benchmark")
-        self.btn_benchmark.clicked.connect(self._on_benchmark)
-        self.btn_benchmark.setEnabled(False)
-        toolbar.addWidget(self.btn_benchmark)
+        toolbar.addWidget(QLabel("Alarm Limit"))
+        self.alarm_limit_spin = QDoubleSpinBox()
+        self.alarm_limit_spin.setRange(MIN_ALARM_LIMIT, MAX_ALARM_LIMIT)
+        self.alarm_limit_spin.setDecimals(1)
+        self.alarm_limit_spin.setSingleStep(5.0)
+        self.alarm_limit_spin.setSuffix(" °C")
+        self.alarm_limit_spin.setValue(self._selected_alarm_limit())
+        self.alarm_limit_spin.valueChanged.connect(self._on_alarm_limit_changed)
+        toolbar.addWidget(self.alarm_limit_spin)
+
+        self.btn_alarm_apply = QPushButton("Apply")
+        self.btn_alarm_apply.setToolTip("Apply the alarm limit to the selected camera only")
+        self.btn_alarm_apply.clicked.connect(self._on_alarm_limit_apply)
+        toolbar.addWidget(self.btn_alarm_apply)
 
         parent_layout.addWidget(toolbar)
 
     def _create_camera_grid(self, parent_layout):
         """Create the 2x2 grid of independent camera viewers.
 
-        The grid owns almost all of the available space (stretch 5 in the
-        main layout). Panel-to-panel spacing is a small fixed gap; each
-        panel is Expanding so every resize grows all four cameras. The
-        images inside keep 640x480 aspect and are never stretched/cropped.
+        The grid owns almost all of the available space inside the camera
+        area (left ~2/3 of the window). Panel-to-panel spacing is a small
+        fixed gap; each panel is Expanding so every resize grows all four
+        cameras. The images inside keep 640x480 aspect and are never
+        stretched/cropped.
         """
         grid = QGridLayout()
         grid.setSpacing(12)
@@ -1511,6 +1964,20 @@ class MainWindow(QMainWindow):
             grid.addWidget(panel, i // 2, i % 2)
 
         parent_layout.addLayout(grid, stretch=5)
+
+    def _create_camera_area(self) -> QWidget:
+        """Left side: the fixed 2x2 camera grid plus the mouse readout.
+
+        Returns a widget whose vertical layout gives the grid almost all of
+        the space and the mouse-temperature readout the strip below it.
+        """
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        self._create_camera_grid(layout)
+        self._create_mouse_temp(layout)
+        return widget
 
     def _select_camera(self, index: int) -> None:
         """Make `index` the active camera.
@@ -1548,10 +2015,7 @@ class MainWindow(QMainWindow):
         self._resize_roi_table()
         self._update_roi_table(runtime.latest_statistics)
 
-        # Alarm table mirrors only the selected camera's alarms.
-        self._clear_alarm_table()
-        self._sync_alarm_table(runtime.latest_alarms)
-        self._active_alarm_count = len(runtime.latest_alarms)
+        # The alarm table is global (all cameras); selection never touches it.
         runtime.display.set_active_alarms({a.roi_name for a in runtime.latest_alarms})
 
         # Mouse readout shows the selected camera only.
@@ -1559,9 +2023,14 @@ class MainWindow(QMainWindow):
             f"Camera {self._selected_index + 1} | Mouse X: --  Y: --  Temperature: --°C"
         )
 
-        # Status bar and toolbar state follow the selected camera.
+        # Status bar, packet statistics and toolbar state follow the selected
+        # camera.
         self._nuc_remaining = -1
+        self.alarm_limit_spin.blockSignals(True)
+        self.alarm_limit_spin.setValue(runtime.alarm_limit)
+        self.alarm_limit_spin.blockSignals(False)
         self._update_status_bar(runtime.processing_time_ms)
+        self._update_packet_stats()
         self._set_selected_controls_enabled()
 
     def _create_mouse_temp(self, parent_layout):
@@ -1571,19 +2040,27 @@ class MainWindow(QMainWindow):
         self.lbl_mouse_temp.setStyleSheet("padding: 4px; background: #252526; border: 1px solid #3C3C3C;")
         parent_layout.addWidget(self.lbl_mouse_temp)
 
-    def _create_lower_section(self, parent_layout):
-        """Bottom section: Alarm Table (left, ~28%) + ROI Statistics Table (right)."""
-        lower = QHBoxLayout()
-        lower.setSpacing(8)
+    def _create_info_panel(self) -> QWidget:
+        """Right side: Common Alarm Table, ROI Statistics Table, Event Log.
 
-        self.alarm_table = QTableWidget(0, 3)
-        self.alarm_table.setHorizontalHeaderLabels(["ROI", "Time", "Current Max (°C)"])
+        Returns a widget whose vertical layout keeps all three sections
+        visible at once. Stretch weights pick sensible vertical proportions
+        on any window size; no widget carries a fixed maximum height here.
+        """
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self.alarm_table = QTableWidget(0, 6)
+        self.alarm_table.setHorizontalHeaderLabels(
+            ["Camera", "ROI", "Time", "Current Max (°C)", "Limit (°C)", "Status"]
+        )
         self.alarm_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.alarm_table.verticalHeader().setVisible(False)
         self.alarm_table.setAlternatingRowColors(True)
         self.alarm_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.alarm_table.setMaximumHeight(350)
-        lower.addWidget(self.alarm_table, 2)  # ~28%
+        layout.addWidget(self.alarm_table, 3)
 
         self.roi_table = QTableWidget(0, 6)  # 0 rows initially, will be set dynamically
         self.roi_table.setHorizontalHeaderLabels(["ROI", "Mean (°C)", "Min (°C)", "Max (°C)", "Range (°C)", "Deviation"])
@@ -1591,59 +2068,171 @@ class MainWindow(QMainWindow):
         self.roi_table.verticalHeader().setVisible(False)
         self.roi_table.setAlternatingRowColors(True)
         self.roi_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.roi_table.setMaximumHeight(350)
-        lower.addWidget(self.roi_table, 5)  # ~72%
+        layout.addWidget(self.roi_table, 4)
 
-        parent_layout.addLayout(lower)
-
-    def _create_event_log(self, parent_layout):
-        """Create event log area."""
         self.event_log = QTextEdit()
         self.event_log.setReadOnly(True)
-        self.event_log.setMaximumHeight(120)
         self.event_log.setFont(QFont("Consolas", 9))
         self.event_log.setStyleSheet("background: #1E1E1E; color: #C8C8C8; border: 1px solid #3C3C3C;")
-        parent_layout.addWidget(self.event_log)
+        layout.addWidget(self.event_log, 2)
+
+        return widget
 
     def _create_status_bar(self):
-        """Create status bar."""
+        """Create status bar with live packet statistics for the selected camera."""
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self._last_proc_time = 0.0
+        self.lbl_acq_fps = QLabel("Acq FPS: --")
+        self.lbl_proc_fps = QLabel("Proc FPS: --")
+        self.lbl_disp_fps = QLabel("Disp FPS: --")
+        self.lbl_packet_loss = QLabel("Packet Loss: n/a")
+        self.lbl_lost = QLabel("Lost: --")
+        self.lbl_acq_fps.setFont(QFont("Consolas", 9))
+        self.lbl_proc_fps.setFont(QFont("Consolas", 9))
+        self.lbl_disp_fps.setFont(QFont("Consolas", 9))
+        self.lbl_packet_loss.setFont(QFont("Consolas", 9))
+        self.lbl_lost.setFont(QFont("Consolas", 9))
+        for widget in (
+            self.lbl_acq_fps,
+            self.lbl_proc_fps,
+            self.lbl_disp_fps,
+            self.lbl_packet_loss,
+            self.lbl_lost,
+        ):
+            widget.setStyleSheet("padding: 0 6px;")
+            self.status_bar.addPermanentWidget(widget)
+        # Display FPS is derived from GUI frame delivery, sampled once per
+        # second. Acquisition/proc FPS come from the worker's GigE stream
+        # statistics; only the display rate is measured here.
+        self._frame_counts = [0] * CAMERA_COUNT
+        self._disp_fps_timer = QTimer(self)
+        self._disp_fps_timer.timeout.connect(self._update_display_fps)
+        self._disp_fps_timer.start(1000)
         self.status_bar.showMessage(
             f"Disconnected | Camera 1 selected | FPS: 0.0 | Processing: 0.0 ms | "
             f"Frame: 0 ms | {FEED_W} x {FEED_H} | "
+            f"Packet loss: 0/min | "
             f"Zoom: {self._cameras[self._selected_index].display.zoom_text} | "
-            f"Active Alarms: 0 | Alarm Limit: {self._alarm_limit:.1f} °C"
+            f"Active Alarms: 0 | Alarm Limit: {self._selected_alarm_limit():.1f} °C"
         )
 
     def _discover_and_connect(self):
-        """Discover cameras and assign up to four to the camera grid."""
+        """Discover cameras and assign tiles according to the database.
+
+        When SQL is available the enabled cameras in dbo.cameras define
+        which logical tiles exist; camera_number determines the tile and
+        serial keeps the existing fixed camera-to-tile behaviour. Disabled
+        cameras (enabled = 0) are never connected. If the database is
+        unavailable the previous discovery-order behaviour is used as a
+        graceful fallback.
+        """
         discovery = CameraDiscovery()
         cameras = discovery.discover()
 
-        if not cameras:
+        if self._db is not None and self._db.connected:
+            self._connect_from_database(cameras)
+            self._report_per_camera_alarm_limitation()
+            return
+
+        if self._db is not None:
+            self._log(
+                f"SQL database unavailable ({self._db.last_error}) - "
+                "using discovery order"
+            )
+        self._connect_from_discovery(cameras)
+
+    def _connect_from_database(self, discovered: List[CameraInfo]):
+        """Assign discovered cameras to tiles using dbo.cameras.
+
+        Each enabled camera is matched to a discovered device by serial
+        number (IP as fallback), then placed on the tile given by its
+        camera_number. The camera id is carried into the worker so ROI
+        definitions are loaded per camera from SQL dbo.rois.
+        """
+        db_cameras = self._db.load_cameras()
+        disabled_count = self._db.count_disabled_cameras()
+        logger.info("Cameras loaded: %d", len(db_cameras))
+        if disabled_count:
+            logger.info("Disabled cameras skipped: %d", disabled_count)
+        self._log(f"SQL configuration loaded: {len(db_cameras)} camera(s) enabled")
+
+        by_serial = {str(c.serial): c for c in discovered}
+        by_ip = {str(getattr(c, "ip", "")): c for c in discovered}
+
+        for row in db_cameras:
+            tile = int(row["camera_number"]) - 1
+            if not (0 <= tile < CAMERA_COUNT):
+                logger.warning(
+                    "Camera %s has camera_number %s outside the %d-tile grid; skipped",
+                    row.get("serial"), row["camera_number"], CAMERA_COUNT,
+                )
+                continue
+            runtime = self._cameras[tile]
+            if runtime.worker is not None:
+                logger.warning(
+                    "Tile %d already assigned; camera %s skipped",
+                    tile + 1, row.get("serial"),
+                )
+                continue
+            serial = str(row.get("serial") or "")
+            ip = str(row.get("ip") or "")
+            camera_info = by_serial.get(serial) or by_ip.get(ip)
+            if camera_info is None:
+                self._log(
+                    f"Camera {tile + 1} ({serial}) configured in SQL but not "
+                    "visible in discovery; not started"
+                )
+                self._panels[tile].title_label.setText(f"Camera {tile + 1} | Not Found")
+                continue
+            runtime.camera_info = camera_info
+            runtime.camera_db_id = row.get("id")
+            defaults = self._load_alarm_defaults(runtime.camera_db_id)
+            runtime.alarm_limit = defaults["temperature_limit"]
+            self._log(f"Camera {tile + 1} discovered: {serial} ({ip})")
+            self._start_worker(runtime, alarm_defaults=defaults)
+
+    def _connect_from_discovery(self, discovered: List[CameraInfo]):
+        """Fallback: assign cameras by discovery order (SQL unavailable)."""
+        if not discovered:
             self._log("No cameras found. Click Connect to retry.")
             return
 
+        default_limits = self._load_alarm_defaults(None)
         for i, runtime in enumerate(self._cameras):
-            if i < len(cameras):
-                runtime.camera_info = cameras[i]
+            if i < len(discovered):
+                runtime.camera_info = discovered[i]
+                runtime.camera_db_id = None
+                runtime.alarm_limit = default_limits["temperature_limit"]
                 self._log(
                     f"Camera {i + 1} discovered: "
                     f"{runtime.camera_info.serial} ({runtime.camera_info.ip})"
                 )
-                self._start_worker(runtime)
+                self._start_worker(runtime, alarm_defaults=default_limits)
             else:
-                    self._panels[i].title_label.setText(f"Camera {i + 1} | No Camera")
+                self._panels[i].title_label.setText(f"Camera {i + 1} | No Camera")
 
-    def _start_worker(self, runtime: CameraRuntime):
+    def _start_worker(
+        self, runtime: CameraRuntime, alarm_defaults: Optional[Dict[str, Any]] = None
+    ):
         """Create and start the worker thread for one camera."""
         if runtime.camera_info is None:
             self._log(f"Camera {runtime.index + 1} has no camera info")
             return
 
-        runtime.worker = CameraWorker(runtime.camera_info, self._config)
+        if alarm_defaults is None:
+            alarm_defaults = self._load_alarm_defaults(runtime.camera_db_id)
+
+        runtime.worker = CameraWorker(
+            runtime.camera_info,
+            self._config,
+            camera_id=runtime.camera_db_id,
+            camera_number=runtime.index + 1,
+            db=self._db,
+            alarm_limit=float(alarm_defaults["temperature_limit"]),
+            alarm_enabled=alarm_defaults["enabled"],
+            alarm_use_max_temperature=alarm_defaults["use_max_temperature"],
+        )
         runtime.worker_thread = QThread()
         runtime.worker.moveToThread(runtime.worker_thread)
 
@@ -1670,6 +2259,12 @@ class MainWindow(QMainWindow):
         runtime.worker.nuc_countdown.connect(
             lambda seconds, i=runtime.index: self._on_nuc_countdown(i, seconds)
         )
+        runtime.worker.packet_loss.connect(
+            lambda i=runtime.index: self._on_packet_loss(i)
+        )
+        runtime.worker.stream_stats.connect(
+            lambda stats, i=runtime.index: self._on_stream_stats(i, stats)
+        )
 
         # Worker owns the acquisition loop. When run() returns it emits
         # finished; the thread then quits and cleans up its own objects.
@@ -1695,25 +2290,18 @@ class MainWindow(QMainWindow):
         for i, runtime in enumerate(self._cameras):
             self._shutdown_thread(runtime)
             self._panels[i].set_connected(False)
+            runtime.stream_stats = None
+            runtime.display_fps = 0.0
         self.btn_connect.setEnabled(True)
         self.btn_disconnect.setEnabled(False)
         self._set_selected_controls_enabled()
         self._clear_alarm_table()
+        self._update_packet_stats()
         self._log("All cameras disconnected")
 
     def _on_disconnect(self):
         """Handle disconnect button - stop all four cameras."""
         self._disconnect_all()
-
-    def _on_reload_roi(self):
-        """Handle reload ROI button - reload ROIs for the selected camera only."""
-        runtime = self._cameras[self._selected_index]
-        if runtime.worker is not None:
-            runtime.worker.reload_rois()
-            runtime.display.set_roi_data(runtime.worker._roi_names, runtime.worker._roi_coords)
-            self._resize_roi_table()
-        else:
-            self._log(f"Camera {self._selected_index + 1}: not connected, cannot reload ROIs")
 
     def _on_focus(self, step_mm: int):
         """Handle focus step buttons for the selected camera."""
@@ -1736,12 +2324,122 @@ class MainWindow(QMainWindow):
             runtime.worker.request_nuc()
             self.btn_nuc.setEnabled(False)
 
-    def _on_benchmark(self):
-        """Run benchmark - process 100 frames and show average processing time."""
-        self._log("Benchmark started (100 frames)...")
-        self.btn_benchmark.setEnabled(False)
-        QTimer.singleShot(100, lambda: self._log("Benchmark: run manually via processing loop timing in status bar"))
-        self.btn_benchmark.setEnabled(True)
+    def _selected_alarm_limit(self) -> float:
+        """Alarm limit of the currently selected camera."""
+        return self._cameras[self._selected_index].alarm_limit
+
+    def _validate_alarm_limit(self, value) -> Optional[float]:
+        """Validate an alarm limit input; return the value or None on rejection.
+
+        Rejects empty/non-numeric input, NaN, infinities and values outside
+        the application's thermal range. A rejected value is reported in the
+        event log and never applied.
+        """
+        if value is None:
+            self._log("Alarm limit invalid: empty value")
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            self._log(f"Alarm limit invalid: '{value}' is not numeric")
+            return None
+        if not math.isfinite(parsed):
+            self._log("Alarm limit invalid: must be a finite number")
+            return None
+        if parsed < MIN_ALARM_LIMIT:
+            self._log(f"Alarm limit invalid: must be at least {MIN_ALARM_LIMIT:.0f} °C")
+            return None
+        if parsed > MAX_ALARM_LIMIT:
+            self._log(f"Alarm limit invalid: must be at most {MAX_ALARM_LIMIT:.0f} °C")
+            return None
+        return parsed
+
+    def _apply_alarm_limit(self, limit: float) -> None:
+        """Apply a validated alarm limit to the selected camera only."""
+        runtime = self._cameras[self._selected_index]
+        runtime.alarm_limit = limit
+        if runtime.worker is not None:
+            runtime.worker.set_alarm_limit(limit)
+        self._log(f"Camera {self._selected_index + 1} alarm limit set to {limit:.1f} °C")
+        self._update_status_bar(self._last_proc_time)
+
+    def _refresh_spin_from_runtime(self) -> None:
+        """Rebind the toolbar spin box to the selected camera's limit."""
+        runtime = self._cameras[self._selected_index]
+        self.alarm_limit_spin.blockSignals(True)
+        self.alarm_limit_spin.setValue(runtime.alarm_limit)
+        self.alarm_limit_spin.blockSignals(False)
+
+    def _on_alarm_limit_changed(self, value: float) -> None:
+        """Apply a new alarm limit to the selected camera at runtime.
+
+        Limits are held per camera in memory. They are not written back to
+        SQL: the schema only persists a single global default. Invalid input
+        is rejected and the spin box is rebound to the current limit.
+        """
+        limit = self._validate_alarm_limit(value)
+        if limit is None:
+            self._refresh_spin_from_runtime()
+            return
+        self._apply_alarm_limit(limit)
+
+    def _on_alarm_limit_apply(self) -> None:
+        """Apply the toolbar spin value to the selected camera explicitly."""
+        limit = self._validate_alarm_limit(self.alarm_limit_spin.value())
+        if limit is None:
+            self._refresh_spin_from_runtime()
+            return
+        self._apply_alarm_limit(limit)
+
+    def _load_alarm_defaults(self, camera_db_id: Optional[int]) -> Dict[str, Any]:
+        """Return the default alarm configuration for a camera.
+
+        Uses dbo.alarm_settings when SQL is available; a per-camera row is
+        preferred when the schema exposes a camera_id column, otherwise the
+        single global row is the initial/default value. Falls back to
+        config.json/built-in defaults when SQL has no row.
+        """
+        settings = None
+        db = self._db
+        if db is not None and db.connected:
+            if db.has_camera_column and camera_db_id is not None:
+                settings = db.load_alarm_settings(camera_db_id)
+            if settings is None:
+                settings = db.load_alarm_settings()
+        if settings is not None:
+            return {
+                "temperature_limit": float(settings.get(
+                    "temperature_limit",
+                    self._config.get("alarm", "temperature_limit"),
+                )),
+                "enabled": _to_bool(settings.get(
+                    "enabled", self._config.get("alarm", "enabled"),
+                )),
+                "use_max_temperature": _to_bool(settings.get(
+                    "use_max_temperature",
+                    self._config.get("alarm", "use_max_temperature"),
+                )),
+            }
+        return {
+            "temperature_limit": float(self._config.get("alarm", "temperature_limit")),
+            "enabled": _to_bool(self._config.get("alarm", "enabled")),
+            "use_max_temperature": _to_bool(self._config.get("alarm", "use_max_temperature")),
+        }
+
+    def _report_per_camera_alarm_limitation(self) -> None:
+        """Warn once when per-camera alarm limits cannot be persisted to SQL."""
+        db = self._db
+        if db is None or not db.connected or self._reported_limitation:
+            return
+        if not db.has_camera_column:
+            msg = (
+                "Per-camera alarm limits are held in application memory only; "
+                "dbo.alarm_settings has no camera_id column, so runtime limits "
+                "are not persisted back to SQL."
+            )
+            logger.warning(msg)
+            self._log(msg)
+            self._reported_limitation = True
 
     def _on_frame_ready(self, index: int, temp_numpy, statistics: List[ROIStatistics], proc_time_ms: float):
         """Handle a new frame for camera `index`."""
@@ -1750,11 +2448,12 @@ class MainWindow(QMainWindow):
         runtime.latest_statistics = statistics
         runtime.processing_time_ms = proc_time_ms
         runtime.display.display_frame(temp_numpy, statistics, proc_time_ms)
+        self._frame_counts[index] += 1
+        self._update_alarm_max_cells(index, statistics)
 
         if index == self._selected_index:
             self._last_proc_time = proc_time_ms
             self._update_roi_table(statistics)
-            self._update_alarm_max_cells(statistics)
             self._update_status_bar(proc_time_ms)
 
     def _on_zoom_changed(self):
@@ -1763,6 +2462,17 @@ class MainWindow(QMainWindow):
 
     def _on_error(self, idx: int, msg: str):
         self._log(f"Camera {idx + 1} ERROR: {msg}")
+
+    def _on_packet_loss(self, index: int) -> None:
+        """Record one acquisition timeout for the rolling one-minute count."""
+        now = time.monotonic()
+        losses = self._packet_loss_times[index]
+        losses.append(now)
+        cutoff = now - 60.0
+        while losses and losses[0] < cutoff:
+            losses.popleft()
+        if index == self._selected_index:
+            self._update_status_bar(self._last_proc_time)
 
     def _on_log(self, msg: str):
         # Filter out per-frame messages - only log major events
@@ -1796,14 +2506,12 @@ class MainWindow(QMainWindow):
     def _set_selected_controls_enabled(self) -> None:
         """Enable per-camera toolbar controls only when the selected camera is connected.
 
-        Connect/Disconnect are global; every other toolbar action (focus,
-        NUC, reload ROI, benchmark) targets only the selected camera, so its
-        enabled state follows the selected camera's connection.
+        Connect/Disconnect are global; every other toolbar action (focus, NUC)
+        targets only the selected camera, so its enabled state follows the
+        selected camera's connection.
         """
         runtime = self._cameras[self._selected_index]
         ready = runtime.connected and runtime.worker is not None
-        self.btn_reload_roi.setEnabled(ready)
-        self.btn_benchmark.setEnabled(ready)
         self.btn_nuc.setEnabled(ready)
         self._set_focus_buttons_enabled(ready)
 
@@ -1838,35 +2546,75 @@ class MainWindow(QMainWindow):
             self.roi_table.setItem(i, 5, QTableWidgetItem(f"{stat.deviation:.2f}"))
 
     def _update_status_bar(self, proc_time_ms: float):
-        """Update status bar with FPS, processing, frame, size, zoom, alarms, NUC."""
+        """Update status bar with camera timing and current health values."""
         fps = int(self._config.get("camera", "fps"))
         frame_time_ms = 1000.0 / fps
+        now = time.monotonic()
+        losses = self._packet_loss_times[self._selected_index]
+        cutoff = now - 60.0
+        while losses and losses[0] < cutoff:
+            losses.popleft()
         nuc_text = f"Next NUC: {self._nuc_remaining} s" if self._nuc_remaining >= 0 else "Next NUC: -"
         self.status_bar.showMessage(
             f"Connected | FPS: {fps}.0 | Processing: {proc_time_ms:.2f} ms | "
             f"Frame: {frame_time_ms:.1f} ms | {FEED_W} x {FEED_H} | "
+            f"Packet loss: {len(losses)}/min | "
             f"Zoom: {self._cameras[self._selected_index].display.zoom_text} | "
             f"Active Alarms: {self._active_alarm_count} | {nuc_text} | "
-            f"Alarm Limit: {self._alarm_limit:.1f} °C"
+            f"Alarm Limit: {self._selected_alarm_limit():.1f} °C"
         )
 
-    def _on_alarms_changed(self, index: int, alarms: List[Alarm]):
-        """Store each camera's alarm set; reconcile the table only for the selected.
+    def _on_stream_stats(self, index: int, stats: Dict[str, Any]) -> None:
+        """Store one camera's GigE stream statistics (emitted ~1/s)."""
+        self._cameras[index].stream_stats = stats
+        if index == self._selected_index:
+            self._update_packet_stats()
 
-        Every camera keeps its own alarm state internally. Only the selected
-        camera's alarm set is mirrored to the shared alarm table; the others
-        are simply cached so selection changes do not need to wait for a
-        fresh alarm emit.
+    def _update_display_fps(self) -> None:
+        """Sample per-camera display FPS once per second."""
+        for i in range(CAMERA_COUNT):
+            self._cameras[i].display_fps = float(self._frame_counts[i])
+            self._frame_counts[i] = 0
+        self._update_packet_stats()
+
+    def _update_packet_stats(self) -> None:
+        """Show live packet statistics for the selected camera.
+
+        Acq/Proc FPS and the lost-packet counters come from the worker's GigE
+        stream statistics (HALCON stream counters). Display FPS is measured
+        from GUI frame delivery. The percentage is shown only when the stream
+        exposes a valid seen/lost ratio; otherwise it is labelled unavailable.
+        """
+        runtime = self._cameras[self._selected_index]
+        stats = runtime.stream_stats
+        acq = stats.get("acquisition_fps", 0.0) if stats else 0.0
+        proc = stats.get("processing_fps", 0.0) if stats else 0.0
+        lost = stats.get("lost", 0) if stats else 0
+        percent = stats.get("packet_loss_percent") if stats else None
+        available = stats.get("percentage_available", False) if stats else False
+
+        self.lbl_acq_fps.setText(f"Acq FPS: {acq:.1f}")
+        self.lbl_proc_fps.setText(f"Proc FPS: {proc:.1f}")
+        self.lbl_disp_fps.setText(f"Disp FPS: {runtime.display_fps:.1f}")
+        if available and percent is not None:
+            self.lbl_packet_loss.setText(f"Packet Loss: {percent:.3f}%")
+        else:
+            self.lbl_packet_loss.setText("Packet Loss: n/a")
+        self.lbl_lost.setText(f"Lost: {lost}")
+
+    def _on_alarms_changed(self, index: int, alarms: List[Alarm]):
+        """Store each camera's alarm set and reconcile the global alarm table.
+
+        Every camera keeps its own alarm state internally. The common alarm
+        table mirrors alarms from ALL cameras, so any camera's change rebuilds
+        the whole table. The selected camera's display outline color follows
+        its own alarm set.
         """
         runtime = self._cameras[index]
         runtime.latest_alarms = alarms
         active = {a.roi_name for a in alarms}
         runtime.display.set_active_alarms(active)
-        if index != self._selected_index:
-            return
-        self._active_alarm_count = len(alarms)
-        self._clear_alarm_table()
-        self._sync_alarm_table(alarms)
+        self._sync_alarm_table()
         self._update_status_bar(self._last_proc_time)
 
     def _on_nuc_countdown(self, index: int, seconds: int):
@@ -1874,47 +2622,62 @@ class MainWindow(QMainWindow):
         if index == self._selected_index:
             self._nuc_remaining = seconds
 
-    def _sync_alarm_table(self, alarms: List[Alarm]):
-        """Insert/remove rows so the alarm table mirrors the active set."""
-        current = {a.roi_name: a for a in alarms}
+    def _sync_alarm_table(self):
+        """Rebuild the global alarm table from every camera's active alarms.
 
-        removed = [n for n in list(self._alarm_rows) if n not in current]
-        for name in removed:
-            row = self._alarm_rows.pop(name)
-            self.alarm_table.removeRow(row)
-            self._alarm_max_shown.pop(name, None)
-            for other, other_row in list(self._alarm_rows.items()):
-                if other_row > row:
-                    self._alarm_rows[other] = other_row - 1
+        One row per active alarm, keyed by (camera index, ROI name). Rows are
+        removed when an alarm clears, so the table represents alarm state, not
+        every frame. Active-alarm coloring on each display is unchanged.
+        """
+        rows = []
+        for i, runtime in enumerate(self._cameras):
+            limit = runtime.alarm_limit
+            for alarm in runtime.latest_alarms:
+                rows.append((i, alarm, limit))
 
-        for name, alarm in current.items():
-            if name in self._alarm_rows:
-                continue
+        self.alarm_table.setRowCount(0)
+        self._alarm_rows = {}
+        self._alarm_max_shown = {}
+        for i, alarm, limit in rows:
             row = self.alarm_table.rowCount()
             self.alarm_table.insertRow(row)
-            self.alarm_table.setItem(row, 0, QTableWidgetItem(alarm.roi_name))
+            self.alarm_table.setItem(row, 0, QTableWidgetItem(f"{i + 1}"))
+            self.alarm_table.setItem(row, 1, QTableWidgetItem(alarm.roi_name))
             self.alarm_table.setItem(
-                row, 1,
+                row, 2,
                 QTableWidgetItem(time.strftime("%H:%M:%S", time.localtime(alarm.timestamp)))
             )
             text = f"{alarm.current_max:.1f}"
-            self.alarm_table.setItem(row, 2, QTableWidgetItem(text))
-            self._alarm_rows[name] = row
-            self._alarm_max_shown[name] = text
+            self.alarm_table.setItem(row, 3, QTableWidgetItem(text))
+            self.alarm_table.setItem(row, 4, QTableWidgetItem(f"{limit:.1f}"))
+            self.alarm_table.setItem(row, 5, QTableWidgetItem("ACTIVE"))
+            self._alarm_rows[(i, alarm.roi_name)] = row
+            self._alarm_max_shown[(i, alarm.roi_name)] = text
 
-    def _update_alarm_max_cells(self, statistics: List[ROIStatistics]):
-        """Refresh only the Current Max cell of active alarm rows."""
+        self._active_alarm_count = sum(
+            len(r.latest_alarms) for r in self._cameras
+        )
+
+    def _update_alarm_max_cells(self, index: int, statistics: List[ROIStatistics]):
+        """Refresh Current Max (and Limit) cells for one camera's alarm rows."""
         if not self._alarm_rows:
             return
+        runtime = self._cameras[index]
+        limit = runtime.alarm_limit
         stats_by_name = {s.name: s for s in statistics}
-        for name, row in self._alarm_rows.items():
+        for (cam_idx, name), row in list(self._alarm_rows.items()):
+            if cam_idx != index:
+                continue
             stat = stats_by_name.get(name)
             if stat is None:
                 continue
             text = f"{stat.maximum:.1f}"
-            if self._alarm_max_shown.get(name) != text:
-                self.alarm_table.setItem(row, 2, QTableWidgetItem(text))
-                self._alarm_max_shown[name] = text
+            if self._alarm_max_shown.get((cam_idx, name)) != text:
+                self.alarm_table.setItem(row, 3, QTableWidgetItem(text))
+                self._alarm_max_shown[(cam_idx, name)] = text
+            limit_item = self.alarm_table.item(row, 4)
+            if limit_item is not None and limit_item.text() != f"{limit:.1f}":
+                self.alarm_table.setItem(row, 4, QTableWidgetItem(f"{limit:.1f}"))
 
     def _clear_alarm_table(self):
         """Clear all alarm rows and per-table counters (e.g. on reconnect).
@@ -1984,7 +2747,9 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    config = ConfigManager()
+    db_repo = DatabaseRepository()
+    db_repo.connect()
+    config = ConfigManager(db=db_repo)
 
     dark_palette = app.palette()
     dark_palette.setColor(dark_palette.ColorRole.Window, QColor(0x1E, 0x1E, 0x1E))
@@ -2001,7 +2766,7 @@ def main():
     dark_palette.setColor(dark_palette.ColorRole.HighlightedText, QColor(0xFF, 0xFF, 0xFF))
     app.setPalette(dark_palette)
 
-    window = MainWindow(config)
+    window = MainWindow(config, db=db_repo)
     window.show()
 
     sys.exit(app.exec())
