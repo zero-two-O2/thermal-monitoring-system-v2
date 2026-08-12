@@ -291,6 +291,18 @@ class DatabaseRepository:
                 "WHERE camera_id = ? AND position_id = ? AND enabled = 1",
                 (camera_id, position_id),
             )
+            # The position-scoped set is authoritative. Until the SQL
+            # migration assigns camera_positions.id to rois.position_id the
+            # legacy rows carry position_id = NULL; fall back to exactly those
+            # un-migrated rows so a camera never starts with an empty ROI set.
+            # After the migration no NULL rows remain, this fallback never
+            # fires and only the true position-scoped set is used.
+            if not rows:
+                rows = self._fetch_all(
+                    "SELECT roi_name, y1, x1, y2, x2 FROM dbo.rois "
+                    "WHERE camera_id = ? AND position_id IS NULL AND enabled = 1",
+                    (camera_id,),
+                )
         else:
             rows = self._fetch_all(
                 "SELECT roi_name, y1, x1, y2, x2 FROM dbo.rois "
@@ -698,6 +710,11 @@ class CameraWorker(QObject):
         self._focus_step = 0
         self._position_requested = False
         self._pending_position_id = None
+        # One-time startup NUC: requested after the first successful
+        # connection, executed on the first valid frame in the acquisition
+        # loop. Never repeated on reconnect.
+        self._startup_nuc_pending = False
+        self._startup_nuc_done = False
         self._frame_number = 0
         self._consecutive_failures = 0
         self._reconnect_count = 0
@@ -798,6 +815,10 @@ class CameraWorker(QObject):
             self._apply_default_focus()
 
             self._connected = True
+            if not self._startup_nuc_done:
+                # One-time startup NUC: the first valid frame in the acquisition
+                # loop will trigger it. The feed is already running.
+                self._startup_nuc_pending = True
             self.connected_signal.emit(True)
             self.initialized.emit()
             return True
@@ -1237,6 +1258,21 @@ class CameraWorker(QObject):
 
             # A successful grab clears the timeout streak.
             self._consecutive_failures = 0
+
+            # Startup NUC: the feed is valid, so fire the one-time startup
+            # correction now. _execute_nuc flips _nuc_active on; subsequent
+            # grab timeouts are handled as NUC-in-progress and frozen frames
+            # are skipped by the existing NUC recovery below. Only the ROI
+            # configuration is kept; the acquisition/thread is untouched.
+            if self._startup_nuc_pending and not self._nuc_active:
+                self._startup_nuc_pending = False
+                self._startup_nuc_done = True
+                self.log_message.emit(
+                    f"Camera {self._camera_label()}: startup NUC started"
+                )
+                self._execute_nuc()
+                self._last_nuc_time = time.time()
+                continue
 
             # NUC recovery: the first valid frame after NUC may still be
             # unstable. Discard exactly one frame, then resume normal
@@ -2462,9 +2498,14 @@ class MainWindow(QMainWindow):
             runtime.camera_db_id = row.get("id")
             positions = list(positions_map.get(runtime.camera_db_id) or [])
             runtime.positions = positions
-            if positions:
-                runtime.current_position_id = positions[0].id
-                runtime.current_position_number = positions[0].position_number
+            # Prefer Position 1 if it exists and is enabled; otherwise the
+            # first enabled position (ordered by position_number).
+            target = next((p for p in positions if p.position_number == 1), None)
+            if target is None and positions:
+                target = positions[0]
+            if target is not None:
+                runtime.current_position_id = target.id
+                runtime.current_position_number = target.position_number
             else:
                 runtime.current_position_id = None
                 runtime.current_position_number = None
