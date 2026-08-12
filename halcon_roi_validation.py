@@ -31,8 +31,9 @@ import os
 import threading
 from collections import deque
 from types import SimpleNamespace
-from typing import Any, List, Tuple, Optional, Dict, Callable
+from typing import Any, List, Tuple, Optional, Dict, Callable, Deque
 from dataclasses import dataclass
+from datetime import datetime
 
 import halcon as ha
 import numpy as np
@@ -42,13 +43,13 @@ try:
 except ImportError:
     pyodbc = None
 
-from PyQt6.QtCore import (QThread, pyqtSignal, QObject, QMutex, Qt, QTimer)
+from PyQt6.QtCore import (QThread, pyqtSignal, pyqtSlot, QObject, QMutex, Qt, QTimer)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QGridLayout, QLabel, QPushButton,
                               QDoubleSpinBox, QTableWidget, QTableWidgetItem,
                               QTextEdit, QStatusBar, QToolBar, QHeaderView,
                               QSizePolicy)
-from PyQt6.QtGui import QFont, QColor, QCloseEvent
+from PyQt6.QtGui import QFont, QColor, QCloseEvent, QImage, QPainter, QPen
 
 from calibration.calibration_manager import CalibrationManager
 from camera.camera_discovery import CameraDiscovery
@@ -64,6 +65,10 @@ logger = logging.getLogger(__name__)
 FEED_W = 640
 FEED_H = 480
 CONFIG_PATH = "config.json"
+FRAME_BUFFER_SIZE = 30
+SNAPSHOT_QUEUE_SIZE = 30
+SNAPSHOT_RETRIGGER_SECONDS = 2.0
+SNAPSHOT_DIRECTORY = "alarm_snapshots"
 
 # Alarm limit validation range. Matches the toolbar spin box and the
 # existing application's thermal range; anything outside is rejected.
@@ -580,6 +585,125 @@ class Alarm:
     current_max: float
 
 
+@dataclass
+class FrameBufferEntry:
+    frame_id: int
+    timestamp: float
+    temp_numpy: np.ndarray
+    statistics: List[ROIStatistics]
+    position_id: Optional[int]
+    position_number: Optional[int]
+
+
+@dataclass
+class SnapshotRequest:
+    camera_id: int
+    camera_number: int
+    position_id: int
+    position_number: int
+    roi_name: str
+    roi_number: int
+    frame_id: int
+    temperature: float
+    limit: float
+    timestamp: float
+    temp_numpy: np.ndarray
+    statistics: List[ROIStatistics]
+    roi_coords: List[tuple]
+    roi_names: List[str]
+
+
+class SnapshotWorker(QObject):
+    """Save bounded alarm snapshot requests outside acquisition and GUI threads."""
+
+    finished = pyqtSignal()
+    snapshot_saved = pyqtSignal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._queue: Deque[SnapshotRequest] = deque(maxlen=SNAPSHOT_QUEUE_SIZE)
+        self._condition = threading.Condition()
+        self._running = True
+
+    def enqueue(self, request: SnapshotRequest) -> None:
+        """Queue one request without blocking the caller on image work."""
+        with self._condition:
+            if len(self._queue) >= SNAPSHOT_QUEUE_SIZE:
+                logger.warning("Alarm snapshot queue full; dropping ROI %s", request.roi_name)
+                return
+            self._queue.append(request)
+            self._condition.notify()
+
+    def stop(self) -> None:
+        """Stop worker after pending requests finish."""
+        with self._condition:
+            self._running = False
+            self._condition.notify_all()
+
+    @pyqtSlot()
+    def run(self) -> None:
+        """Consume requests sequentially and write PNG files."""
+        while True:
+            with self._condition:
+                while self._running and not self._queue:
+                    self._condition.wait()
+                if not self._running and not self._queue:
+                    break
+                request = self._queue.popleft()
+            try:
+                path = self._save(request)
+                if path:
+                    self.snapshot_saved.emit(path)
+            except Exception:
+                logger.exception("Failed to save alarm snapshot for ROI %s", request.roi_name)
+        self.finished.emit()
+
+    @staticmethod
+    def _save(request: SnapshotRequest) -> Optional[str]:
+        """Render thermal frame and overlays into operator-readable PNG."""
+        os.makedirs(SNAPSHOT_DIRECTORY, exist_ok=True)
+        frame = np.asarray(request.temp_numpy)
+        finite = np.isfinite(frame)
+        if not np.any(finite):
+            display = np.zeros(frame.shape, dtype=np.uint8)
+        else:
+            values = frame[finite]
+            minimum = float(values.min())
+            maximum = float(values.max())
+            if maximum <= minimum:
+                maximum = minimum + 1.0
+            display = np.clip((frame - minimum) / (maximum - minimum), 0.0, 1.0)
+            display[~finite] = 0.0
+            display = (display * 255.0).astype(np.uint8)
+
+        image = QImage(display.data, display.shape[1], display.shape[0],
+                        display.strides[0], QImage.Format.Format_Grayscale8).copy()
+        painter = QPainter(image)
+        painter.setFont(QFont("Segoe UI", 10))
+        painter.setPen(QPen(QColor("white"), 1))
+        painter.drawText(8, 18, f"Camera {request.camera_number} | Position {request.position_number}")
+        painter.drawText(8, 36, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(request.timestamp)))
+
+        active = request.roi_name
+        for stat, coords, name in zip(request.statistics, request.roi_coords, request.roi_names):
+            y1, x1, y2, x2 = coords
+            color = QColor("red") if name == active else QColor("yellow")
+            painter.setPen(QPen(color, 2))
+            painter.drawRect(x1, y1, max(1, x2 - x1), max(1, y2 - y1))
+            painter.drawText(x1, max(12, y1 - 3), f"{name}: {stat.maximum:.1f}C")
+        painter.end()
+
+        stamp = datetime.fromtimestamp(request.timestamp).strftime("%y%m%d_%H%M%S")
+        filename = (
+            f"Camera{request.camera_number}_Position{request.position_number}_"
+            f"ROI{request.roi_number}_{stamp}.png"
+        )
+        path = os.path.join(SNAPSHOT_DIRECTORY, filename)
+        if not image.save(path, "PNG"):
+            raise OSError(f"QImage failed to save {path}")
+        return path
+
+
 class AlarmManager:
     """Two-state alarm engine (NORMAL <-> ACTIVE) for a set of ROIs.
 
@@ -688,6 +812,8 @@ class CameraWorker(QObject):
         alarm_limit: Optional[float] = None,
         alarm_enabled: Optional[bool] = None,
         alarm_use_max_temperature: Optional[bool] = None,
+        position_number: Optional[int] = None,
+        positions: Optional[List[CameraPosition]] = None,
     ):
         super().__init__()
         self._camera_info = camera_info
@@ -695,6 +821,8 @@ class CameraWorker(QObject):
         self._camera_id = camera_id
         self._camera_number = camera_number
         self._position_id = position_id
+        self._current_position_number = position_number
+        self._positions = list(positions or [])
         self._db = db
         self._running = False
         self._mutex = QMutex()
@@ -749,6 +877,20 @@ class CameraWorker(QObject):
         # between consecutive samples.
         self._last_stream_stats_emit = time.time()
         self._last_stats_frame_number = 0
+
+        # 2-second frame ring buffer (~18-30 frames at 9 FPS)
+        self._frame_buffer: Deque[FrameBufferEntry] = deque(maxlen=FRAME_BUFFER_SIZE)
+        self._frame_buffer_lock = threading.Lock()
+
+        # Snapshot worker for background PNG saving
+        self._snapshot_worker: Optional[SnapshotWorker] = None
+        self._snapshot_thread: Optional[QThread] = None
+
+        # 2-second re-trigger suppression per (camera, position, roi)
+        self._last_snapshot_time: Dict[Tuple[int, int, str], float] = {}
+        self._snapshot_time_lock = threading.Lock()
+
+        self._init_snapshot_worker()
 
     def _resolve_alarm_limit(self, value: Optional[float]) -> float:
         """Per-camera limit when supplied, otherwise the SQL/config default."""
@@ -965,7 +1107,15 @@ class CameraWorker(QObject):
             self.rois_changed.emit(self._roi_names, self._roi_coords)
             return
 
+        # Find position number for this position_id
+        position_number = None
+        for pos in getattr(self, '_positions', []):
+            if pos.id == position_id:
+                position_number = pos.position_number
+                break
+
         self._position_id = position_id
+        self._current_position_number = position_number
         rois: List[ROIData] = []
         if self._db is not None and self._db.connected:
             if self._camera_id is not None:
@@ -998,6 +1148,87 @@ class CameraWorker(QObject):
         alarm table (via alarms_changed); printing every CLEAR/ACTIVE
         transition here floods the event log, so nothing is emitted.
         """
+        if not active:
+            return  # Only snapshot on NORMAL -> ALARM transitions
+
+        # Check 2-second re-trigger suppression.
+        now = time.time()
+        suppress_key = (self._camera_id or 0, self._position_id or 0, roi_name)
+        with self._snapshot_time_lock:
+            last_snap = self._last_snapshot_time.get(suppress_key, 0.0)
+            if now - last_snap < SNAPSHOT_RETRIGGER_SECONDS:
+                logger.debug(
+                    "Snapshot suppressed for camera %s position %s ROI %s (%.1fs since last)",
+                    self._camera_label(), self._position_id, roi_name, now - last_snap
+                )
+                return
+
+        # AlarmManager evaluates immediately after this frame enters buffer.
+        with self._frame_buffer_lock:
+            if not self._frame_buffer:
+                return
+            frame_entry = self._frame_buffer[-1]
+
+        # Find ROI statistics for this specific ROI
+        roi_stat = None
+        for stat in frame_entry.statistics:
+            if stat.name == roi_name:
+                roi_stat = stat
+                break
+        if roi_stat is None:
+            return
+
+        # Get position number for filename
+        position_number = frame_entry.position_number
+        if position_number is None:
+            position_number = self._current_position_number
+        if position_number is None:
+            position_number = 1  # Fallback
+
+        roi_number = self._roi_names.index(roi_name) + 1
+        request = SnapshotRequest(
+            camera_id=self._camera_id or 0,
+            camera_number=self._camera_number or 1,
+            position_id=self._position_id or 0,
+            position_number=position_number,
+            roi_name=roi_name,
+            roi_number=roi_number,
+            frame_id=frame_entry.frame_id,
+            temperature=roi_stat.maximum,
+            limit=self._alarm_limit,
+            timestamp=frame_entry.timestamp,
+            temp_numpy=frame_entry.temp_numpy,
+            statistics=frame_entry.statistics,
+            roi_coords=self._roi_coords.copy(),
+            roi_names=self._roi_names.copy(),
+        )
+
+        if self._snapshot_worker is not None:
+            self._snapshot_worker.enqueue(request)
+            with self._snapshot_time_lock:
+                self._last_snapshot_time[suppress_key] = now
+
+    def _init_snapshot_worker(self):
+        """Initialize the snapshot worker thread."""
+        try:
+            self._snapshot_worker = SnapshotWorker()
+            self._snapshot_thread = QThread()
+            self._snapshot_worker.moveToThread(self._snapshot_thread)
+            self._snapshot_thread.started.connect(self._snapshot_worker.run)
+            self._snapshot_worker.finished.connect(self._snapshot_thread.quit)
+            self._snapshot_worker.finished.connect(self._snapshot_worker.deleteLater)
+            self._snapshot_thread.finished.connect(self._snapshot_thread.deleteLater)
+            self._snapshot_thread.finished.connect(self._on_snapshot_worker_finished)
+            self._snapshot_thread.start()
+        except Exception as e:
+            logger.exception("Failed to initialize snapshot worker")
+            self._snapshot_worker = None
+            self._snapshot_thread = None
+
+    def _on_snapshot_worker_finished(self):
+        """Clean up when snapshot worker finishes."""
+        self._snapshot_worker = None
+        self._snapshot_thread = None
 
     def _read_stream_stats(self) -> Dict[str, Any]:
         """Read GigE stream counters from the framegrabber.
@@ -1325,6 +1556,18 @@ class CameraWorker(QObject):
                 proc_time_ms = (time.perf_counter() - proc_start) * 1000.0
                 self._last_proc_ms = proc_time_ms
 
+                # Store frame in ring buffer for alarm snapshots
+                frame_entry = FrameBufferEntry(
+                    frame_id=self._frame_number,
+                    timestamp=time.time(),
+                    temp_numpy=temp_frame.copy(),
+                    statistics=statistics,
+                    position_id=self._position_id,
+                    position_number=self._current_position_number,
+                )
+                with self._frame_buffer_lock:
+                    self._frame_buffer.append(frame_entry)
+
                 # Evaluate alarm state from existing statistics only.
                 # No recomputation, no additional HALCON calls.
                 self._alarm_manager.evaluate(statistics)
@@ -1399,6 +1642,13 @@ class CameraWorker(QObject):
         grab_image_async is left in flight.
         """
         self._running = False
+        if self._snapshot_worker is not None:
+            self._snapshot_worker.stop()
+        if self._snapshot_thread is not None:
+            self._snapshot_thread.quit()
+            self._snapshot_thread.wait(5000)
+            self._snapshot_worker = None
+            self._snapshot_thread = None
         try:
             if self._framegrabber:
                 ha.close_framegrabber(self._framegrabber)
@@ -2565,6 +2815,8 @@ class MainWindow(QMainWindow):
             alarm_limit=float(alarm_defaults["temperature_limit"]),
             alarm_enabled=alarm_defaults["enabled"],
             alarm_use_max_temperature=alarm_defaults["use_max_temperature"],
+            position_number=runtime.current_position_number,
+            positions=runtime.positions,
         )
         runtime.worker_thread = QThread()
         runtime.worker.moveToThread(runtime.worker_thread)
