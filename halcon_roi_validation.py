@@ -2606,8 +2606,16 @@ class MainWindow(QMainWindow):
         self._init_worker.finished.connect(self._init_thread.quit)
         self._init_thread.finished.connect(self._init_worker.deleteLater)
         self._init_thread.finished.connect(self._init_thread.deleteLater)
+        # Reset the Python references once the C++ thread has stopped so a
+        # later connect click never touches the already-deleted QThread object.
+        self._init_thread.finished.connect(self._on_init_thread_finished)
         self._init_thread.started.connect(self._init_worker.run)
         self._init_thread.start()
+
+    def _on_init_thread_finished(self) -> None:
+        """Clear the finished init thread references (its C++ object is gone)."""
+        self._init_thread = None
+        self._init_worker = None
 
     def _on_init_status(self, msg: str) -> None:
         """Mirror initialization progress to the status bar."""

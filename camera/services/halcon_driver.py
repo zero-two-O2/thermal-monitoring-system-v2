@@ -194,11 +194,15 @@ class HalconDriver:
             logger.warning(
                 f"Unable to negotiate packet size: {exc}"
             )
+        packet_size = ha.get_framegrabber_param(self._framegrabber, "[Stream]DeviceStreamChannelPacketSize")
+        logger.info(f"Negotiated packet size: {packet_size}")
+        mtu = ha.get_framegrabber_param(self._framegrabber, "[Interface]GevInterfaceMUT")
+        logger.info(f"Interface MTU: {mtu}")
 
         try:
             self.set_parameter(
                 "[Stream]GevStreamReceiveSocketSize",
-                1048576,
+                512000,
             )
         except Exception as exc:
             logger.warning(

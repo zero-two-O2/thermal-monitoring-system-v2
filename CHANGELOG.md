@@ -1,3 +1,32 @@
+## 2026-08-12 11:30
+
+### What changed
+- Added `setup_env.ps1`, a one-click environment setup script for fresh PCs. It locates Python 3.10, installs the global packages from the new `requirements-global.txt` (HALCON interface, NumPy, OpenCV, PyQt5, harvesters, genicam), creates the project venv with `--system-site-packages` when missing, installs the dev packages from `requirements-dev.txt`, verifies with `tools/check_environment.py`, then activates the venv.
+- Added `start_app.bat`, a double-click launcher that runs the setup once and then starts the application (`main.py`) with the venv python.
+- Added `requirements-global.txt` with the pinned global packages (mvtec-halcon 24113, numpy 2.2.6, opencv-python 4.13.0.92, PyQt5 5.15.11, harvesters 1.4.3, genicam 1.5.1).
+### Why
+- New machines had no documented way to recreate the environment; users had to follow `docs/Development_Setup.md` manually.
+### Notes
+- HALCON runtime (24.11) must be installed on the machine before `mvtec-halcon` can be installed; the script warns about this. Global packages are installed into the global Python, never into the venv (project constraint). Verified end-to-end on this PC: `ALL CHECKS PASSED`, `import app.application` works. On a PC without Python 3.10 the script aborts with instructions.
+### Files Changed
+- setup_env.ps1
+- start_app.bat
+- requirements-global.txt
+- CHANGELOG.md
+
+## 2026-08-12 10:50
+
+### What changed
+- Fixed `RuntimeError: wrapped C/C++ object of type QThread has been deleted` in `halcon_roi_validation.py` when clicking Connect again after an initialization run finished.
+- The finished init `QThread` was deleted via `deleteLater` but `self._init_thread` kept a stale Python reference, so the next `start_initialization()` call touched a destroyed object. Added `_on_init_thread_finished()` which resets `_init_thread`/`_init_worker` to `None` when the thread stops; `closeEvent()` is now safe too.
+### Why
+- Re-connecting after a failed GigE discovery (no cameras found) crashed the app.
+### Notes
+- Signal slot runs on the GUI thread (the `QThread` object lives there), so clearing the references is safe. Verify by clicking Connect twice in a row.
+### Files Changed
+- halcon_roi_validation.py
+- CHANGELOG.md
+
 ## 2026-08-11 18:20
 
 ### What changed

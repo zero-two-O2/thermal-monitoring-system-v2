@@ -1,0 +1,15 @@
+# Packages that must be installed in the GLOBAL Python installation
+# (NOT inside the venv). The project venv is created with
+# --system-site-packages so these remain visible to the venv.
+#
+# IMPORTANT:
+# - mvtec-halcon requires the HALCON runtime (24.11) to be installed on the
+#   machine FIRST. See docs/Development_Setup.md.
+# - These packages match the versions pinned for Python 3.10.x (3.10.7).
+
+mvtec-halcon==24113
+numpy==2.2.6
+opencv-python==4.13.0.92
+PyQt5==5.15.11
+harvesters==1.4.3
+genicam==1.5.1
