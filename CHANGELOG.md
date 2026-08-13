@@ -1,3 +1,16 @@
+## 2026-08-13 22:57
+
+### What changed
+- Added `halcon_camera_diagnosis.py`, a standalone camera performance diagnosis tool (PyQt6) that answers "where is the bottleneck?" per camera: Camera -> Acquisition -> Processing -> Display. It supports N cameras, shows IR (Mono16) and visible (YUV422_8) feeds side by side, and measures acquisition FPS (IR/visible/combined), processing FPS + time, display FPS (measured in the GUI), IR/visible payload MB/s, GigE stream lost/seen packet counters, latencies, dropped/timeout counts, plus PC CPU/RAM (psutil).
+- The acquisition path mirrors `halcon_roi_validation.py` exactly (same HALCON params, select/start/grab, 5322 timeout handling, reopen ladder). Camera discovery reuses `camera/camera_discovery.py` (no SQL). The GUI always opens, even with no camera/HALCON; a dead camera is isolated so the others keep streaming.
+### Why
+- Diagnostic tool for tuning the Fluke TV46L 640x480@9Hz dual-stream setup and validating multi-camera performance before production.
+### Notes
+- Device has one GigE stream channel, so IR and visible share one framegrabber via alternating select/start/grab; visible failures (>=5) fall back to IR-only. MB/s is image payload (bytes/frame x fps). Verified headless (offscreen): py_compile, ruff, image helpers, worker connect-failure, metrics math, threaded latest-frame loop, camera isolation, GUI open with no camera. Real HALCON/cameras not present here; live validation on hardware is still required.
+### Files Changed
+- halcon_camera_diagnosis.py (new)
+- CHANGELOG.md
+
 ## 2026-08-12 11:30
 
 ### What changed
