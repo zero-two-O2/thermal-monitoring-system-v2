@@ -1,15 +1,13 @@
-# Development dependencies for the project virtual environment.
+# Development / test dependencies for the Thermal Monitoring System v2.
+# Installed inside .venv by setup_environment.py after requirements.txt.
 #
-# IMPORTANT:
-# - HALCON (mvtec-halcon) is NOT listed here. It is a global dependency
-#   provided by the global Python installation (see docs/Development_Setup.md).
-# - This virtual environment must be created with --system-site-packages
-#   so that global packages (HALCON, numpy, opencv, PyQt5) remain visible.
-# - Packages provided by the global installation: numpy, opencv-python,
-#   mvtec-halcon, harvesters, genicam, PyQt5.
+# PyQt6 is used only by diagnostic and test GUIs (tests/*, halcon_* tools).
+# The main application uses PyQt5 (see requirements.txt), so PyQt6 and
+# PySide6 are never runtime dependencies.
 
-PyQt6==6.11.0
 pytest==9.1.1
 ruff==0.15.22
+PyQt6==6.11.0
 debugpy==1.8.21
 psutil==7.2.2
+pyodbc==5.3.0                # only used by halcon_roi_validation.py (optional tool)

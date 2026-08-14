@@ -1,0 +1,16 @@
+# Runtime dependencies for the Thermal Monitoring System v2.
+# Installed inside the project virtual environment (.venv) by
+# setup_environment.py.
+#
+# HALCON is split into two parts:
+#   - mvtec-halcon   -> Python bindings, installed here via pip.
+#   - HALCON runtime -> system software installed by the MVTec installer
+#                       (NOT a pip package). setup_environment.py detects it.
+#
+# Versions are pinned to the combination verified with the HALCON 24.11
+# runtime and Python 3.10 (64-bit).
+
+mvtec-halcon==24113          # HALCON 24.11.3 Python bindings (must match the runtime)
+numpy==2.2.6
+opencv-python==4.13.0.92
+PyQt5==5.15.11               # GUI framework used by the main application

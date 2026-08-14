@@ -6,6 +6,49 @@ This project is a complete redesign of the previous prototype. The primary goal 
 
 ---
 
+## New PC Setup
+
+One command creates the project virtual environment and installs all Python dependencies:
+
+```powershell
+git clone <repository>
+cd Thermal_Monitoring_System_v2
+python setup_environment.py
+```
+
+The setup script:
+
+- Requires Python 3.10 (64-bit); it locates it, or explains how to install it.
+- Creates a self-contained `.venv` inside the repository (no reliance on packages installed on another PC or globally).
+- Installs runtime dependencies from `requirements.txt` and development/test dependencies from `requirements-dev.txt`.
+- Detects the HALCON runtime and verifies every critical import.
+
+Activate the environment and run the application:
+
+```powershell
+.venv\Scripts\Activate.ps1
+python main.py
+```
+
+or skip activation and call the venv interpreter directly:
+
+```powershell
+.venv\Scripts\python.exe main.py
+```
+
+`.venv` is local to the repository and is listed in `.gitignore`; it is never committed.
+
+### Manual system dependency: HALCON
+
+HALCON is provided in two parts:
+
+- **Python bindings** (`mvtec-halcon`) — installed automatically into `.venv` by the setup script.
+- **Runtime and license** — system software installed by the MVTec installer (not a pip package). It must be installed and licensed on the machine before `import halcon` works.
+
+`setup_environment.py` detects the runtime (registry, `C:\Program Files\MVTec\HALCON-*`, and `PATH`) and, if it is missing, finishes with a `SETUP INCOMPLETE` report telling you exactly what to install.
+
+---
+
 # Project Goals
 
 The system shall support:

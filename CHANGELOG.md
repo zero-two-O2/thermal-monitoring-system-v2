@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-08-14 20:00
+### What changed
+- Replaced the fragile "global packages + --system-site-packages" setup with a self-contained virtual environment. New `setup_environment.py` is the single one-command entry point: it locates a 64-bit Python 3.10, creates `.venv`, upgrades pip, installs `requirements.txt` (runtime) and `requirements-dev.txt` (development), detects the HALCON runtime (registry, `C:\Program Files\MVTec\HALCON-*`, `PATH`), verifies imports (`[OK]/[FAIL]`), and prints a final report with activation instructions.
+- Split dependencies by role: `requirements.txt` now holds only runtime packages (mvtec-halcon, numpy, opencv-python, PyQt5) and `requirements-dev.txt` holds development/test packages (pytest, ruff, PyQt6, debugpy, psutil, pyodbc). Deleted `requirements-global.txt` — nothing needs a global pip install anymore (HALCON runtime is a system installer, not pip).
+- `mvtec-halcon==24113` (HALCON 24.11.3 Python bindings) is now installed inside `.venv`; it is a pure cffi/ctypes package and works in a clean venv as long as the HALCON runtime 24.11 is installed on the machine and its `bin\x64-win64` folder is on `PATH`.
+- Added `.pytest_cache/`, `.ruff_cache/`, `build/`, `dist/`, `*.egg-info/`, `recordings/`, coverage artifacts to `.gitignore`; removed the accidentally committed `.venv` from Git tracking (`git rm --cached`).
+- `setup_env.ps1` and `start_app.bat` now delegate to `setup_environment.py`. README gained a "New PC Setup" section.
+### Why
+- Previous setup required global packages and `--system-site-packages`, which did not work on a clean PC (the second PC lacked HALCON). Goal: clone + one command = working project-local `.venv`, no manual package troubleshooting.
+### Notes
+- HALCON runtime + license must be installed by the MVTec installer; setup script detects it and reports `SETUP INCOMPLETE` otherwise. The global Python site-packages still contain a broken pip leftover (`~ip`, `~ip-26.1.2.dist-info`) that produces `WARNING: Ignoring invalid distribution -ip`; it is not reproduced in the fresh venv and was not fixed by design.
+### Files Changed
+- setup_environment.py (new)
+- requirements.txt (new)
+- requirements-dev.txt
+- requirements-global.txt (deleted)
+- setup_env.ps1
+- start_app.bat
+- .gitignore
+- README.md
+- CHANGELOG.md
+
 ## 2026-08-15 10:00
 
 ### What changed

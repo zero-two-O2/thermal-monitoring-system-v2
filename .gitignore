@@ -8,3 +8,12 @@ logs/
 *.log
 .vscode/*
 !.vscode/settings.json
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+recordings/

@@ -1,5 +1,11 @@
 # Development Setup
 
+> **Recommended flow**: run `python setup_environment.py` from the repository
+> root. It creates a self-contained `.venv`, installs all dependencies, checks
+> the HALCON runtime and verifies imports — no global packages required.
+> The global-package instructions below describe the legacy setup and are kept
+> for reference.
+
 How to set up, repair, and verify the development environment for the Thermal
 Monitoring System v2.
 
