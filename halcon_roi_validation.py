@@ -1,7 +1,7 @@
 """
-halcon_roi_validation.py
 
-Standalone GUI-based HALCON validation tool for Fluke TV46L thermal camera.
+
+GUI-based HALCON validation tool for Fluke TV46L thermal camera.
 Replicates MVTec HDevelop processing architecture exactly.
 
 Processing workflow per frame:
@@ -1504,6 +1504,7 @@ class CameraWorker(QObject):
                 self._execute_nuc()
                 self._last_nuc_time = time.time()
                 continue
+            #Change later
 
             # NUC recovery: the first valid frame after NUC may still be
             # unstable. Discard exactly one frame, then resume normal
@@ -2138,7 +2139,7 @@ class HALCONDisplayWidget(QWidget):
                             ha.set_color(self._window_handle, color)
                             ha.disp_rectangle1(self._window_handle, y1, x1, y2, x2)
 
-                            label = f"{stat.name}: {stat.minimum:.1f}°C"
+                            label = f"{stat.name}: {stat.maximum:.1f}°C"
                             ha.disp_text(self._window_handle, label, "image",
                                          y1 - 15, x1, color, [], [])
                     except ValueError:
@@ -2335,7 +2336,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._config = config if config is not None else ConfigManager()
         self._db = db
-        self.setWindowTitle("HALCON ROI Validation Tool - TV46L")
+        self.setWindowTitle("FOX - TV46L")
         self.resize(1280, 800)
 
         # Background initialization state. _init_bundle carries the SQL data

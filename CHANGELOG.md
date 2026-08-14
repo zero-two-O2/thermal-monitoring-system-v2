@@ -1,3 +1,27 @@
+## 2026-08-13 12:00
+
+### What changed
+- Added section `2A. Detailed Execution Flow (End-to-End)` to `docs/halcon_roi_validation_review.md`: step-by-step flow of `halcon_roi_validation.py` from process startup through worker init, acquisition loop, per-frame ROI processing, alarms, snapshots, position switching, NUC, focus, and shutdown — with line references.
+### Why
+- Requested a detailed runtime flow so developers can trace the code's execution without reading all 3525 lines.
+### Notes
+- Documentation only; no code changed. Line references point at current `halcon_roi_validation.py` line numbers.
+### Files Changed
+- docs/halcon_roi_validation_review.md
+- CHANGELOG.md
+
+## 2026-08-13 00:00
+
+### What changed
+- Added `docs/halcon_roi_validation_review.md`, a full code review of `halcon_roi_validation.py` covering purpose, architecture, threading model, every HALCON operator with location/why, DB access, alarm engine, snapshot worker, NUC/focus handling, recovery logic, display layer, startup flow, and degradation points.
+### Why
+- Requested documentation so future developers/agents can understand the entire 3525-line validation tool without reading it top to bottom.
+### Notes
+- Documentation only; no code changed. Cross-references `docs/ROI_Architecture.md`, `docs/GUI_Event_Flow.md`, `docs/halcon_operators.md`.
+### Files Changed
+- docs/halcon_roi_validation_review.md
+- CHANGELOG.md
+
 ## 2026-08-12 11:30
 
 ### What changed
