@@ -1,3 +1,65 @@
+# Changelog
+
+## 2026-08-15 10:00
+
+### What changed
+- Added a Time-sliced strategy (now the default) to `halcon_camera_diagnosis.py`. The camera has one GigE stream channel and a camera-global source selector, and live tests showed both dual-handle (visible lags, IR disturbed by selector flap) and rapid switching (feed badly disturbed) are disruptive. Time-sliced keeps IR streaming continuously at full rate for 2 s, then flips to VL_Data for a 0.6 s visible burst and back - only two source switches per cycle, so IR stays smooth and visible updates periodically. This restores the stable-IR behaviour that was lost when the earlier single-handle fallback was removed. Strategies that pause IR by design now get a longer wedge window (`wedge_recovery_s`) so the visible phase does not trigger a spurious reconnect.
+### Why
+- "None of the strategies is working" - live testing confirmed the camera cannot stream both feeds cleanly through source switching. Time-sliced is the reliable configuration within the hardware limit: IR priority, periodic visible. The experimental strategies (rapid switch, dual handle, dual component) stay available for measuring the camera's real limits.
+### Notes
+- Verify on camera: time-sliced should show smooth IR (~9 FPS during the IR phase) with visible updating every ~2.6 s. Check the "Payload:" line in Dual Component mode for evidence of a combined IR+visible frame (the only mechanism that could beat time-slicing).
+### Files Changed
+- halcon_camera_diagnosis.py
+- CHANGELOG.md
+
+## 2026-08-15 09:00
+
+### What changed
+- Rebuilt `halcon_camera_diagnosis.py` as an experimental acquisition-strategy tester. Added four selectable strategies: Baseline (single handle, IR_Data only, reproduces `halcon_roi_validation.py`), Dual Handle (two GigE connections: device string + camera IP, both streaming), Rapid Source Switching (single handle alternating IR_Data/VL_Data at a configurable hold interval, with per-direction switch-latency measurement), and Dual Component (single handle; probes payload-related HALCON parameters and the acquired frame's shape/channels to detect whether one frame carries both IR and visible). Added an automated experiment mode that sweeps rapid-switch hold intervals (1000, 500, 250, 100, 50, 25, 10 ms), runs each for 5 s, and reports IR FPS, visible FPS, frame counts, errors, and switch latencies in a results table in the GUI. Worker loop was refactored around a `BaseStrategy.step()` contract with a shared `_route_result()`; acquisition, processing and display FPS/latency stay measured separately.
+### Why
+- The TV46L has exactly one GigE stream channel (`DeviceStreamChannelCount=1`) and a camera-global `FLK_TI_StreamDataSourceSelector`, so visible lag was suspected to be a hard hardware limit. Instead of assuming that, the tool now experimentally tests every acquisition mechanism (dual connection, rapid switching at measured minimum intervals, combined payload/components) so the measured camera/HALCON behavior, not an assumption, determines the conclusion. ThermoView displays both feeds at full rate, so the mechanism must be found, not ruled out.
+### Notes
+- Requires a live camera to run the experiments. Watch the log and the "Run Switch Experiment" results. The Dual Component strategy reports payload probe evidence (e.g. `image_channels`, `PayloadSize`, frame shape) to decide whether a combined frame exists. If rapid switching shows a low stable minimum switch time, dual full-rate may be achievable via fast alternation; if not, that is the experimental answer.
+### Files Changed
+- halcon_camera_diagnosis.py
+- CHANGELOG.md
+
+## 2026-08-14 15:00
+
+### What changed
+- `halcon_camera_diagnosis.py`: rewrote visible acquisition so the visible feed works even though HALCON GigEVision2 can only open one stream per camera and the TV46L's `FLK_TI_StreamDataSourceSelector` is camera-global. The second handle is now opened by camera IP instead of the device string (which HALCON refused with error #5312). If the camera accepts the second connection (dual mode), both feeds stream concurrently; if not, the tool falls back to single-handle time-sliced visible sampling: it switches the shared stream to VL_Data every 4 s, grabs one visible frame, and switches back. Added `_dotted_ip()` (converts the integer IP from `[Device]GevDeviceIPAddress` to dotted form), `_verify_visible_stream()` (detects when the visible handle just echoes the IR source by comparing frame byte sizes and drops the handle), `_disable_visible()` and `close_visible()`. The IR ingest now detects a stream-source conflict (IR frame byte size suddenly changes) and disables the conflicting dual-stream.
+### Why
+- User test showed the visible feed was missing: opening a second handle with the same device string failed with HALCON error #5312 (device already in use). HALCON GigEVision2 opens only the first available stream channel per camera, so concurrent IR+VIS requires either a second IP connection or time-slicing the single stream.
+### Notes
+- Requires a live camera to verify which mode the TV46L enters. The IP second-connection may be refused by the camera, or the visible handle may echo the IR source (source selector is camera-global) - both cases fall back to time-sliced sampling, which costs roughly 1 s of IR FPS per 4 s cycle. Watch the log for "visible stream open ... failed" / "visible dual-stream unavailable" / "IR only (stream source conflict)".
+### Files Changed
+- halcon_camera_diagnosis.py
+- CHANGELOG.md
+
+## 2026-08-14 10:00
+
+### What changed
+- Fixed the disabled visible feed in `halcon_camera_diagnosis.py`. Stream switching now uses a clean `switch_stream()` (abort pending grab, select source, restart acquisition, drain stale frames) instead of switching `FLK_TI_StreamDataSourceSelector` mid-acquisition. Bit depth follows the stream: 16 for IR_Data, -1 (HALCON default) for VL_Data YUV422_8. Visible-grab errors are now logged at WARNING for the first 3 failures instead of DEBUG, so the real HALCON error is visible.
+### Why
+- The visible (VL_Data) stream was disabled after 5 consecutive grab failures. The old per-frame switch kept the IR bit depth (16) active on the 8-bit YUV visible stream and did not abort the pending IR grab, so HALCON rejected the visible grab.
+### Notes
+- Requires a live camera to verify the visible feed now streams. `num_buffers` still reports read-only on this camera; that warning is harmless.
+### Files Changed
+- halcon_camera_diagnosis.py
+- CHANGELOG.md
+
+## 2026-08-14 12:30
+
+### What changed
+- Rewrote IR/VIS acquisition in `halcon_camera_diagnosis.py`. Replaced the single framegrabber that switched streams (IR_Data / VL_Data) every loop iteration with two dedicated framegrabber handles (`_ir_fg`, `_vis_fg`), one locked to each stream. The loop now does non-blocking newest-frame grabs from both handles and a stall (no IR frame for 3 s) reopens both handles. Visible frames are now handled as RGB8 when HALCON delivers 3-channel data (640x480x3 = 921600 B/f) instead of being mis-decoded as packed YUYV; the YUYV decoder stays as a fallback for other builds.
+### Why
+- The old per-frame `switch_stream()` did abort + re-arm + GigE re-sync + drain on every iteration, which capped the whole loop at ~0.8 FPS (IR and VIS). The ROI validation tool never switches streams and runs smooth at the configured 9 FPS; the diagnosis tool now mirrors that for both feeds, so IR returns to 9 FPS and the visible feed runs at whatever the camera supplies.
+### Notes
+- Requires a live camera to verify both feeds now run at full rate. If the camera rejects a second GigE connection, the visible handle open degrades to IR-only (visible shows "N/A") instead of failing. Visible native rate may still be capped if `FLK_TI_ControlFeature_SetFrameRate` is a global camera control rather than IR-only.
+### Files Changed
+- halcon_camera_diagnosis.py
+- CHANGELOG.md
+
 ## 2026-08-13 12:00
 
 ### What changed
