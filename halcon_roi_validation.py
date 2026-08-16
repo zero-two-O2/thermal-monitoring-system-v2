@@ -90,13 +90,40 @@ DB_DRIVER_CANDIDATES: Tuple[str, ...] = (
     "SQL Server Native Client 11.0",
     "SQL Server",
 )
-DB_SERVER_CANDIDATES: Tuple[str, ...] = (
-    DB_SERVER,
-    "localhost\\SQLEXPRESS",
-    ".\\SQLEXPRESS",
-    "localhost",
-    ".",
-)
+# NOTE: there is deliberately NO server-candidate list. The primary server
+# is the configured DB_SERVER only; the fallback server is DB_FALLBACK_SERVER
+# only. A broad server scan wastes startup time and was removed.
+
+# Per-attempt SQL connection timeout (seconds). Each of the two possible
+# connection attempts (primary, then fallback) honours it, so a dead server
+# can never hang startup indefinitely.
+DB_CONNECTION_TIMEOUT = 5
+
+# Fallback SQL Server used only when the primary server is unreachable.
+# The fallback instance (DESKTOP-4L5G45H) uses SQL Server Authentication;
+# the SA password is NEVER hardcoded here - it is read from the
+# THERMALMONITOR_SQL_PASSWORD environment variable. TrustServerCertificate
+# is enabled because the fallback instance may present a self-signed
+# certificate.
+DB_FALLBACK_SERVER = os.environ.get("TM_SQL_FALLBACK_SERVER", "DESKTOP-4L5G45H")
+DB_FALLBACK_DATABASE = os.environ.get("TM_SQL_FALLBACK_DATABASE", "ThermalMonitor")
+DB_FALLBACK_USERNAME = os.environ.get("TM_SQL_FALLBACK_USERNAME", "sa")
+DB_FALLBACK_PASSWORD = os.environ.get("THERMALMONITOR_SQL_PASSWORD", "")
+DB_FALLBACK_TRUST_SERVER_CERTIFICATE = True
+
+
+def _sanitize_sql_error(exc: Exception) -> str:
+    """Return a credential-safe SQL error message.
+
+    ODBC connection failures can embed connection details in the message
+    text. Any configured password is scrubbed so secrets never reach the
+    logs or the GUI event log.
+    """
+    message = str(exc)
+    for secret in (DB_PASSWORD, DB_FALLBACK_PASSWORD):
+        if secret:
+            message = message.replace(secret, "***")
+    return message
 
 
 def _to_bool(value: Any) -> bool:
@@ -154,10 +181,15 @@ class DatabaseConfig:
     server: str = DB_SERVER
     database: str = DB_DATABASE
     driver_candidates: Tuple[str, ...] = DB_DRIVER_CANDIDATES
-    server_candidates: Tuple[str, ...] = DB_SERVER_CANDIDATES
     trusted_connection: bool = DB_TRUSTED_CONNECTION
     username: str = DB_USERNAME
     password: str = DB_PASSWORD
+    connection_timeout: int = DB_CONNECTION_TIMEOUT
+    fallback_server: str = DB_FALLBACK_SERVER
+    fallback_database: str = DB_FALLBACK_DATABASE
+    fallback_username: str = DB_FALLBACK_USERNAME
+    fallback_password: str = DB_FALLBACK_PASSWORD
+    fallback_trust_server_certificate: bool = DB_FALLBACK_TRUST_SERVER_CERTIFICATE
 
 
 class DatabaseRepository:
@@ -179,6 +211,7 @@ class DatabaseRepository:
         self._has_positions_table = False
         self.connected = False
         self.last_error = ""
+        self.db_source: Optional[str] = None
 
     @property
     def has_camera_column(self) -> bool:
@@ -186,11 +219,15 @@ class DatabaseRepository:
         return self._has_camera_column
 
     def connect(self) -> bool:
-        """Open a SQL Server connection using the first working candidate.
+        """Open a SQL Server connection: primary first, then the fallback.
 
-        Only ODBC drivers actually installed on the machine are tried, then
-        every candidate server. A short per-attempt timeout keeps a dead
-        database cheap to fail.
+        Exactly two deliberate connection attempts are made: the configured
+        primary server (with its known authentication), then - only if that
+        fails - the configured fallback server (SQL Server Authentication).
+        A single resolved ODBC driver and a 5-second per-attempt timeout keep
+        a dead server cheap to fail. There is no server scanning, no driver
+        scanning and no retry loop. On success db_source records which
+        server supplied the connection for diagnostics.
         """
         if self._conn is not None:
             return True
@@ -199,45 +236,133 @@ class DatabaseRepository:
             logger.error(self.last_error)
             return False
 
-        installed = set(pyodbc.drivers() or [])
-        drivers = [d for d in self._config.driver_candidates if d in installed]
-        if not drivers:
+        driver = self._resolve_driver(set(pyodbc.drivers() or []))
+        if not driver:
             self.last_error = (
                 "No SQL Server ODBC driver installed; database cannot be reached"
             )
             logger.error(self.last_error)
             return False
 
-        for server in self._config.server_candidates:
-            for driver in drivers:
-                conn_str = self._build_connection_string(server, driver)
-                try:
-                    self._conn = pyodbc.connect(conn_str, timeout=5, autocommit=True)
-                    self.connected = True
-                    self.last_error = ""
-                    logger.info("SQL connected (%s, driver %s)", server, driver)
-                    self._has_camera_column = self._detect_alarm_camera_column()
-                    self._has_position_column = self._detect_rois_position_column()
-                    self._has_positions_table = self._detect_positions_table()
-                    self._app_settings = self.load_application_settings()
-                    return True
-                except Exception as exc:
-                    self.last_error = str(exc)
+        logger.info("[SQL] Trying primary database (%s)...", self._config.server)
+        conn, primary_error = self._try_connection(
+            server=self._config.server,
+            driver=driver,
+            database=self._config.database,
+            trusted=self._config.trusted_connection,
+            username=self._config.username,
+            password=self._config.password,
+            trust_server_certificate=False,
+        )
+        if conn is not None:
+            return self._activate(conn, "primary")
+        logger.info("[SQL] Primary database unavailable.")
 
-        logger.error("SQL database unavailable: %s", self.last_error)
+        logger.info(
+            "[SQL] Trying fallback database (%s)...", self._config.fallback_server
+        )
+        conn, fallback_error = self._try_connection(
+            server=self._config.fallback_server,
+            driver=driver,
+            database=self._config.fallback_database,
+            trusted=False,
+            username=self._config.fallback_username,
+            password=self._config.fallback_password,
+            trust_server_certificate=self._config.fallback_trust_server_certificate,
+        )
+        if conn is not None:
+            return self._activate(conn, "fallback")
+        logger.info("[SQL] Fallback database unavailable.")
+
+        self.last_error = (
+            f"Primary: {primary_error or 'no error reported'}; "
+            f"Fallback: {fallback_error or 'no error reported'}"
+        )
+        logger.error("[SQL] Database connection failed: %s", self.last_error)
         return False
 
-    def _build_connection_string(self, server: str, driver: str) -> str:
+    def _resolve_driver(self, installed: set) -> Optional[str]:
+        """Return the single ODBC driver used for every connection attempt.
+
+        The first installed driver in the configured preference order wins;
+        exactly one driver is returned. No per-server driver fallback exists.
+        """
+        for candidate in self._config.driver_candidates:
+            if candidate in installed:
+                return candidate
+        return None
+
+    def _try_connection(
+        self,
+        server: str,
+        driver: str,
+        database: str,
+        trusted: bool,
+        username: str,
+        password: str,
+        trust_server_certificate: bool,
+    ) -> Tuple[Optional[Any], str]:
+        """Return (connection, last_error) for one deliberate connection attempt.
+
+        Builds the connection string for the given server/driver and opens
+        it honouring the per-attempt timeout, so an unreachable server fails
+        cheaply. Credentials are never included in the returned error text.
+        """
+        conn_str = self._build_connection_string(
+            server, driver, database=database, trusted=trusted,
+            username=username, password=password,
+            trust_server_certificate=trust_server_certificate,
+        )
+        try:
+            return (
+                pyodbc.connect(
+                    conn_str,
+                    timeout=self._config.connection_timeout,
+                    autocommit=True,
+                ),
+                "",
+            )
+        except Exception as exc:
+            return None, _sanitize_sql_error(exc)
+
+    def _activate(self, conn: Any, source: str) -> bool:
+        """Adopt a successfully opened connection and run the schema probes."""
+        self._conn = conn
+        self.connected = True
+        self.db_source = source
+        self.last_error = ""
+        logger.info("[SQL] %s database connected.", source.upper())
+        self._has_camera_column = self._detect_alarm_camera_column()
+        self._has_position_column = self._detect_rois_position_column()
+        self._has_positions_table = self._detect_positions_table()
+        self._app_settings = self.load_application_settings()
+        return True
+
+    def _build_connection_string(
+        self,
+        server: str,
+        driver: str,
+        database: Optional[str] = None,
+        trusted: Optional[bool] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        trust_server_certificate: bool = False,
+    ) -> str:
         parts = [
             f"DRIVER={{{driver}}}",
             f"SERVER={server}",
-            f"DATABASE={self._config.database}",
+            f"DATABASE={database or self._config.database}",
         ]
-        if self._config.trusted_connection:
+        use_trusted = self._config.trusted_connection if trusted is None else trusted
+        if use_trusted:
             parts.append("Trusted_Connection=yes")
         else:
-            parts.append(f"UID={self._config.username}")
-            parts.append(f"PWD={self._config.password}")
+            parts.append(f"UID={username or self._config.username}")
+            parts.append(
+                f"PWD={password if password is not None else self._config.password}"
+            )
+        if trust_server_certificate:
+            parts.append("TrustServerCertificate=yes")
         return ";".join(parts)
 
     def _fetch_all(
@@ -2916,7 +3041,8 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(msg)
 
     def _on_sql_connected(self) -> None:
-        self._log("SQL database connected")
+        source = getattr(self._db, "db_source", "primary")
+        self._log(f"SQL connected: {source.upper()}")
         if self._db.has_camera_column:
             self._log("Per-camera alarm limits available")
 
