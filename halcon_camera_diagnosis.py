@@ -16,8 +16,9 @@ import numpy as np
 
 try:
     import halcon as ha
-except Exception:
-    ha = None
+except Exception as exc:
+    print(f"HALCON import failed: {exc}")
+    raise
 
 try:
     import psutil
