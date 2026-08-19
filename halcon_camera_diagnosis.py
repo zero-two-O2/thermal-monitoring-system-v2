@@ -81,6 +81,9 @@ STRATEGY_RAPID_SWITCH = "rapid_switch"
 STRATEGY_DUAL_COMPONENT = "dual_component"
 # One handle; IR streams continuously, visible is sampled in short bursts.
 STRATEGY_TIME_SLICED = "time_sliced"
+# One handle; VL/visible stream only. IR is never opened or acquired, so the
+# visible camera can be diagnosed independently at its native rate.
+STRATEGY_VISIBLE_ONLY = "visible_only"
 
 STRATEGY_LABELS = {
     STRATEGY_BASELINE: "Baseline (IR only)",
@@ -88,8 +91,10 @@ STRATEGY_LABELS = {
     STRATEGY_RAPID_SWITCH: "Rapid Source Switching",
     STRATEGY_DUAL_COMPONENT: "Dual Component / Payload",
     STRATEGY_TIME_SLICED: "Time-sliced (IR priority)",
+    STRATEGY_VISIBLE_ONLY: "Visible Only (VL)",
 }
 STRATEGY_ORDER = [
+    STRATEGY_VISIBLE_ONLY,
     STRATEGY_TIME_SLICED,
     STRATEGY_DUAL_HANDLE,
     STRATEGY_BASELINE,
@@ -298,6 +303,7 @@ class HalconAcquisition:
         self.single_handle = single_handle
         self._ir_fg: Any = None
         self._vis_fg: Any = None
+        self._visible_only = False
 
     @property
     def handle(self) -> Any:
@@ -309,7 +315,7 @@ class HalconAcquisition:
 
     @property
     def dual_mode(self) -> bool:
-        return self._vis_fg is not None
+        return self._vis_fg is not None and not self._visible_only
 
     def open(self) -> None:
         """Open the IR handle; optionally attempt a second IP connection."""
@@ -333,6 +339,24 @@ class HalconAcquisition:
                 "Camera %s: no second connection available; visible feed will "
                 "be time-sliced on the shared stream", self.device,
             )
+
+    def open_visible_only(self) -> None:
+        """Open one framegrabber locked to the VL/visible stream only.
+
+        No IR handle is opened and no IR acquisition is started, so the
+        visible stream is the only acquisition source. The VL handle is also
+        referenced as the primary handle so stream statistics are read from
+        the active visible stream; dual_mode stays disabled because the
+        camera-global FLK_TI_StreamDataSourceSelector is intentionally left
+        on VL_Data for this mode.
+        """
+        if ha is None:
+            raise RuntimeError("HALCON runtime not installed")
+        self._visible_only = True
+        self._open_handle(VISIBLE_STREAM, self.device)
+        if self._vis_fg is None:
+            raise RuntimeError("Visible stream handle not opened")
+        self._ir_fg = self._vis_fg
 
     def _visible_device_candidates(self) -> List[str]:
         """Device strings to try for the second (visible) handle.
@@ -578,6 +602,9 @@ class BaseStrategy(ABC):
 
     name = "base"
     visible_capable = False
+    # Which stream this strategy treats as its primary (stall-monitored) feed.
+    # The worker's wedge recovery watches this stream.
+    primary_stream = IR_STREAM
     # How long without an IR frame before the worker reopens the camera.
     # Strategies that pause IR by design (time-sliced visible bursts) need
     # a longer window than continuous strategies.
@@ -593,6 +620,10 @@ class BaseStrategy(ABC):
     @abstractmethod
     def step(self) -> StrategyResult:
         """Produce the newest available frames for this strategy."""
+
+    def grab_first_frame(self, timeout_ms: int = FIRST_FRAME_TIMEOUT_MS) -> Any:
+        """Grab the first frame of the primary stream after acquisition starts."""
+        return self.acq.grab_ir(timeout_ms)
 
     def diagnostics(self) -> Dict[str, Any]:
         return {}
@@ -793,6 +824,52 @@ class TimeSlicedStrategy(BaseStrategy):
         }
 
 
+class VisibleOnlyStrategy(BaseStrategy):
+    """Visible-only acquisition: acquire ONLY the VL_Data stream.
+
+    One framegrabber handle is opened with FLK_TI_StreamDataSourceSelector
+    set to VL_Data; the IR stream is never opened, acquired or processed.
+    step() delivers only visible frames, so the worker's IR path is entirely
+    bypassed. Used to diagnose the visible camera independently.
+    """
+
+    name = STRATEGY_VISIBLE_ONLY
+    visible_capable = True
+    primary_stream = VISIBLE_STREAM
+
+    def open(self) -> None:
+        try:
+            self.acq.open_visible_only()
+        except Exception as exc:
+            logger.error("Visible-only acquisition failed: %s", exc)
+            raise RuntimeError(f"Visible-only acquisition failed: {exc}") from exc
+
+    def grab_first_frame(self, timeout_ms: int = FIRST_FRAME_TIMEOUT_MS) -> Any:
+        try:
+            frame = self.acq.grab_visible(timeout_ms)
+        except Exception as exc:
+            if _is_grab_timeout(exc):
+                raise RuntimeError(
+                    "Visible/VL stream is not available on this camera."
+                ) from exc
+            raise
+        if frame is None:
+            raise RuntimeError("Visible/VL stream is not available on this camera.")
+        return frame
+
+    def step(self) -> StrategyResult:
+        frame = None
+        try:
+            frame = self.acq.grab_visible(0)
+        except Exception as exc:
+            if not _is_grab_timeout(exc):
+                raise
+        return StrategyResult(visible_image=frame)
+
+    def diagnostics(self) -> Dict[str, Any]:
+        return {"source": VISIBLE_STREAM}
+
+
 class DualComponentStrategy(BaseStrategy):
     """Test D: probe whether one payload can carry IR + visible together.
 
@@ -846,6 +923,9 @@ def _make_strategy(
     hold_ms: int = RAPID_SWITCH_HOLD_MS,
 ) -> BaseStrategy:
     """Build the strategy + its HalconAcquisition for a camera."""
+    if name == STRATEGY_VISIBLE_ONLY:
+        acq = HalconAcquisition(device, frame_rate, ip, single_handle=True)
+        return VisibleOnlyStrategy(acq)
     if name == STRATEGY_BASELINE:
         acq = HalconAcquisition(device, frame_rate, ip, single_handle=True)
         return BaselineStrategy(acq)
@@ -1117,10 +1197,10 @@ class CameraWorker(QObject):
             result = self._strategy.step()
             if result.ir_image is None:
                 # A first frame may need a moment after acquisition starts.
-                first = self._strategy.acq.grab_ir(FIRST_FRAME_TIMEOUT_MS)
+                first = self._strategy.grab_first_frame(FIRST_FRAME_TIMEOUT_MS)
                 if first is None:
-                    raise RuntimeError("No first IR frame received within 5s")
-                self._ingest(first, IR_STREAM)
+                    raise RuntimeError("No first frame received within 5s")
+                self._ingest(first, self._strategy.primary_stream)
             else:
                 self._ingest(result.ir_image, IR_STREAM)
             self._verify_visible_stream()
@@ -1271,6 +1351,13 @@ class CameraWorker(QObject):
             ir_display, _, _ = self._ingest(result.ir_image, IR_STREAM)
 
         if result.visible_image is not None and self._visible_enabled:
+            # In visible-only mode there is no IR feed, so a delivered visible
+            # frame is the primary stream and keeps the stall recovery fresh.
+            if (
+                self._strategy is not None
+                and self._strategy.primary_stream == VISIBLE_STREAM
+            ):
+                self._last_ir_frame_at = time.perf_counter()
             self._vis_fps.tick()
             self._acq_fps.tick()
             self._vis_frames += 1
@@ -1378,10 +1465,10 @@ class CameraWorker(QObject):
             self._apply_current_strategy()
             result = self._strategy.step()
             if result.ir_image is None:
-                first = self._strategy.acq.grab_ir(FIRST_FRAME_TIMEOUT_MS)
+                first = self._strategy.grab_first_frame(FIRST_FRAME_TIMEOUT_MS)
                 if first is None:
-                    raise RuntimeError("No first IR frame after reopen")
-                self._ingest(first, IR_STREAM)
+                    raise RuntimeError("No first frame after reopen")
+                self._ingest(first, self._strategy.primary_stream)
             else:
                 self._ingest(result.ir_image, IR_STREAM)
             self._verify_visible_stream()
@@ -1566,6 +1653,7 @@ class CameraWidget(QFrame):
         self._feed_w = feed_w
         self._feed_h = feed_h
         self._status = "Disconnected"
+        self._visible_only = False
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet(
             "CameraWidget { background: #252526; border: 1px solid #3C3C3C; }"
@@ -1606,7 +1694,13 @@ class CameraWidget(QFrame):
     def _title_text(self) -> str:
         serial = getattr(self._info, "serial", "?")
         model = getattr(self._info, "model", "")
-        return f"Camera {self.index + 1} | {serial} | {model} | {self._status}"
+        mode = " | VISIBLE ONLY" if self._visible_only else ""
+        return f"Camera {self.index + 1} | {serial} | {model}{mode} | {self._status}"
+
+    def set_visible_only(self, enabled: bool) -> None:
+        """Show/hide the visible-only mode indicators on this widget."""
+        self._visible_only = enabled
+        self.title.setText(self._title_text())
 
     def set_status(self, status: str) -> None:
         self._status = status
@@ -1624,6 +1718,11 @@ class CameraWidget(QFrame):
         if ir_display is not None:
             self.ir_view.setPixmap(_numpy_to_pixmap(ir_display, self._feed_w, self._feed_h))
             self.ir_view.setText("")
+        elif self._visible_only:
+            # Visible-only mode never acquires IR; mark the IR panel disabled
+            # instead of leaving the placeholder frame visible.
+            self.ir_view.setPixmap(QPixmap())
+            self.ir_view.setText("IR\nDisabled")
         if visible_display is not None:
             self.vis_view.setPixmap(_numpy_to_pixmap(visible_display, self._feed_w, self._feed_h))
             self.vis_view.setText("")
@@ -1634,6 +1733,9 @@ class CameraWidget(QFrame):
 
     def update_stats(self, m: CameraMetrics, display_fps: float, display_ms: float) -> None:
         """Refresh the statistics block (called a few times per second)."""
+        if m.strategy == STRATEGY_VISIBLE_ONLY:
+            self._update_stats_visible_only(m, display_fps, display_ms)
+            return
         vis_label = (
             f"{m.visible_fps:.1f} FPS | {m.vis_mbps:.2f} MB/s"
             if m.visible_enabled
@@ -1668,6 +1770,38 @@ class CameraWidget(QFrame):
         )
         if m.payload_info:
             text += f"\nPayload: {m.payload_info}"
+        self.stats.setText(text)
+
+    def _update_stats_visible_only(
+        self, m: CameraMetrics, display_fps: float, display_ms: float
+    ) -> None:
+        """Visible-only stats block: VL metrics only, IR clearly disabled.
+
+        Acq/Proc/Disp FPS here reflect the VL stream; Proc measures the
+        visible-to-display conversion performed in this mode.
+        """
+        loss = (
+            f"{m.packet_loss_percent:.2f}%"
+            if m.percentage_available
+            else "N/A"
+        )
+        if m.counters_available:
+            pkt_label = (
+                f"Lost pkt: {m.packet_lost} | Seen pkt: {m.packet_seen} ({loss})"
+            )
+        else:
+            pkt_label = "Lost pkt: N/A | Seen pkt: N/A"
+        text = (
+            "VISIBLE ONLY (IR acquisition disabled)\n"
+            f"VIS:  {m.visible_fps:.1f} FPS | {m.vis_mbps:.2f} MB/s (payload)\n"
+            f"Acq: {m.acquisition_fps:.1f} | Proc: {m.processing_fps:.1f} | "
+            f"Disp: {display_fps:.1f}\n"
+            f"VIS {m.vis_w}x{m.vis_h}  {m.vis_bytes_per_frame} B/f ({m.vis_format})\n"
+            f"Proc: {m.proc_ms:.1f} ms | Disp: {display_ms:.1f} ms\n"
+            f"Strategy: {m.strategy}\n"
+            f"Frames VIS {m.visible_frames} | Timeouts {m.timeouts} | Errors {m.errors}\n"
+            f"Avg VIS {m.avg_vis_fps:.1f} FPS | {pkt_label} | {m.status}"
+        )
         self.stats.setText(text)
 
 
@@ -2000,6 +2134,9 @@ class DiagnosisWindow(QMainWindow):
 
     def _on_strategy_applied(self, index: int, strategy: str) -> None:
         logger.info("Camera %d strategy applied: %s", index + 1, strategy)
+        widget = self._widgets.get(index)
+        if widget is not None:
+            widget.set_visible_only(strategy == STRATEGY_VISIBLE_ONLY)
 
     def _on_experiment_result(self, index: int, rows: object) -> None:
         lines = [f"Camera {index + 1} switch-interval experiment"]
@@ -2033,6 +2170,7 @@ class DiagnosisWindow(QMainWindow):
             metrics = self._metrics.get(index)
             if metrics is None:
                 continue
+            widget.set_visible_only(metrics.strategy == STRATEGY_VISIBLE_ONLY)
             widget.update_stats(
                 metrics,
                 self._display_fps.get(index, 0.0),

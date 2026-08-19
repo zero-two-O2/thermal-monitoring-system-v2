@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-08-17 11:01
+### What changed
+- Added a "Visible Only (VL)" acquisition mode to `halcon_camera_diagnosis.py`. New `STRATEGY_VISIBLE_ONLY` / `VisibleOnlyStrategy` opens a single framegrabber with `FLK_TI_StreamDataSourceSelector = VL_Data` and acquires only the visible stream; the IR handle is never opened, so no IR frames are acquired, processed or converted. Selectable from the existing Strategy toolbar combo.
+- Worker first-frame/reopen logic now goes through `BaseStrategy.grab_first_frame()` + `primary_stream` instead of hardcoded `grab_ir`/IR_STREAM, so visible-only connects and recovers cleanly. Stall recovery stays fresh on visible frames in this mode.
+- GUI: camera title shows "VISIBLE ONLY", IR panel shows "IR Disabled", and the stats block switches to a visible-only layout (VIS FPS/MB/s, VIS size, no IR lines).
+- Added `test_visible_only_mode.py` (headless, HALCON stubbed) covering factory wiring, VL-only open params, step, error handling, IR bypass, and IR-only regression.
+### Why
+- Need to diagnose/test the TV46L visible camera independently. The earlier combined-stream approach errored, and all existing modes keep IR acquisition active.
+### Notes
+- `VL_Data` is the verified selector value (docs/Halcon_Parameters.md:460, docs/halcon_parameters.csv:36). Requires live-camera validation: select Visible Only, confirm only VL stream starts, switch to IR Only and back, disconnect while active.
+### Files Changed
+- halcon_camera_diagnosis.py
+- test_visible_only_mode.py (new)
+- CHANGELOG.md
+
 ## 2026-08-14 20:00
 ### What changed
 - Replaced the fragile "global packages + --system-site-packages" setup with a self-contained virtual environment. New `setup_environment.py` is the single one-command entry point: it locates a 64-bit Python 3.10, creates `.venv`, upgrades pip, installs `requirements.txt` (runtime) and `requirements-dev.txt` (development), detects the HALCON runtime (registry, `C:\Program Files\MVTec\HALCON-*`, `PATH`), verifies imports (`[OK]/[FAIL]`), and prints a final report with activation instructions.
